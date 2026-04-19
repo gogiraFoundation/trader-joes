@@ -1,0 +1,13 @@
+.env
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.venv/
+venv/
+.circuit_reset
+.DS_Store
+artifacts/*.joblib
+artifacts/
+!artifacts/strategy_profiles/
+!artifacts/strategy_profiles/**

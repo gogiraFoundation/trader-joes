@@ -1,0 +1,501 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>tr_bot metrics</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            surface: { DEFAULT: '#0f1419', card: '#1a2332', border: '#2d3a4d' },
+            accent: { DEFAULT: '#38bdf8', muted: '#64748b' }
+          },
+          fontFamily: { sans: ['IBM Plex Sans', 'system-ui', 'sans-serif'] }
+        }
+      }
+    };
+  </script>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <style>
+    html, body { min-height: 100%; margin: 0; }
+    body { background-color: #0f1419; color: #e2e8f0; font-family: system-ui, sans-serif; }
+  </style>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+</head>
+<body class="bg-surface min-h-screen text-slate-100 font-sans antialiased">
+  <div id="auth-gate" class="hidden fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4">
+    <div class="bg-surface-card border border-surface-border rounded-xl p-6 max-w-md w-full shadow-xl">
+      <h2 class="text-lg font-semibold text-white mb-2">Dashboard token required</h2>
+      <p class="text-sm text-slate-400 mb-4">Enter the same <code class="text-accent">DASHBOARD_TOKEN</code> used by the main dashboard. Stored in session only.</p>
+      <input id="token-input" type="password" placeholder="Token" class="w-full rounded-lg bg-surface border border-surface-border px-3 py-2 text-sm mb-3 focus:outline-none focus:ring-2 focus:ring-accent" />
+      <button type="button" id="token-save" class="w-full rounded-lg bg-sky-600 hover:bg-sky-500 py-2 text-sm font-medium">Save &amp; load</button>
+    </div>
+  </div>
+
+  <header class="border-b border-surface-border bg-surface-card/80 backdrop-blur">
+    <div class="max-w-6xl mx-auto px-4 py-6 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+      <div>
+        <h1 class="text-2xl font-bold tracking-tight text-white">tr_bot</h1>
+        <p class="text-sm text-slate-400 mt-1">Metrics dashboard</p>
+      </div>
+      <div class="flex flex-wrap items-center gap-2">
+        <a href="/" class="px-3 py-1 rounded-full text-xs font-medium bg-slate-700 hover:bg-slate-600 text-slate-100">Main dashboard</a>
+        <span id="pill-status" class="px-3 py-1 rounded-full text-xs font-medium bg-slate-700">…</span>
+        <span id="pill-redis" class="px-3 py-1 rounded-full text-xs font-medium bg-slate-700">Redis</span>
+        <span id="pill-pg" class="px-3 py-1 rounded-full text-xs font-medium bg-slate-700">Postgres</span>
+      </div>
+    </div>
+  </header>
+
+  <main class="max-w-6xl mx-auto px-4 py-8 space-y-8">
+    <p id="error-banner" class="hidden rounded-lg border border-red-500/50 bg-red-950/40 px-4 py-3 text-sm text-red-200"></p>
+
+    <section class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+      <article class="rounded-xl border border-surface-border bg-surface-card p-6 shadow-lg">
+        <div class="flex items-start justify-between gap-4">
+          <div>
+            <h2 class="text-sm font-semibold text-white">NAV / equity history</h2>
+            <p id="eq-nav-blurb" class="text-xs text-slate-500 mt-1">From <code class="text-slate-400">equity_history.json</code> (persisted)</p>
+          </div>
+          <p id="nav-last" class="text-xs text-slate-400 font-mono">—</p>
+        </div>
+        <div class="mt-4 h-56">
+          <canvas id="chart-nav"></canvas>
+        </div>
+      </article>
+
+      <article class="rounded-xl border border-surface-border bg-surface-card p-6 shadow-lg">
+        <div class="flex items-start justify-between gap-4">
+          <div>
+            <h2 class="text-sm font-semibold text-white">Drawdown vs peak</h2>
+            <p id="eq-dd-blurb" class="text-xs text-slate-500 mt-1">Computed from NAV series above (running peak)</p>
+          </div>
+          <p id="dd-last" class="text-xs text-slate-400 font-mono">—</p>
+        </div>
+        <div class="mt-4 h-56">
+          <canvas id="chart-dd"></canvas>
+        </div>
+      </article>
+    </section>
+
+    <section class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+      <article class="rounded-xl border border-surface-border bg-surface-card p-6 shadow-lg">
+        <div class="flex items-start justify-between gap-4">
+          <div>
+            <h2 class="text-sm font-semibold text-white">Dependencies latency</h2>
+            <p class="text-xs text-slate-500 mt-1">Sampled every 20s from <code class="text-slate-400">/api/dashboard/summary</code></p>
+          </div>
+          <p id="deps-last" class="text-xs text-slate-400 font-mono">—</p>
+        </div>
+        <div class="mt-4 h-56">
+          <canvas id="chart-deps"></canvas>
+        </div>
+      </article>
+
+      <article class="rounded-xl border border-surface-border bg-surface-card p-6 shadow-lg">
+        <div class="flex items-start justify-between gap-4">
+          <div>
+            <h2 class="text-sm font-semibold text-white">Circuit breaker &amp; trade limits</h2>
+            <p class="text-xs text-slate-500 mt-1">Sampled every 20s (rolling window)</p>
+          </div>
+          <p id="risk-last" class="text-xs text-slate-400 font-mono">—</p>
+        </div>
+        <div class="mt-4 h-56">
+          <canvas id="chart-risk"></canvas>
+        </div>
+      </article>
+    </section>
+
+    <section class="rounded-xl border border-surface-border bg-surface-card p-6 shadow-lg">
+      <div class="flex items-start justify-between gap-4">
+        <div>
+          <h2 class="text-sm font-semibold text-white">Backtest metrics</h2>
+          <p class="text-xs text-slate-500 mt-1">Latest from artifacts + rolling samples while this page is open</p>
+        </div>
+        <p id="bt-last" class="text-xs text-slate-400 font-mono">—</p>
+      </div>
+      <div class="mt-4 h-56">
+        <canvas id="chart-bt"></canvas>
+      </div>
+    </section>
+  </main>
+
+  <script>
+    function $(id) { return document.getElementById(id); }
+
+    function pill(el, ok, text) {
+      if (!el) return;
+      el.textContent = text;
+      if (ok === true) el.className = 'px-3 py-1 rounded-full text-xs font-medium bg-emerald-900/60 text-emerald-300';
+      else if (ok === false) el.className = 'px-3 py-1 rounded-full text-xs font-medium bg-amber-900/60 text-amber-200';
+      else el.className = 'px-3 py-1 rounded-full text-xs font-medium bg-slate-700 text-slate-200';
+    }
+
+    function fmtUtc(tsMs) {
+      try { return new Date(tsMs).toISOString().replace('T', ' ').replace('Z', ' UTC'); }
+      catch (_) { return '—'; }
+    }
+
+    function toMsFromIso(iso) {
+      if (!iso) return NaN;
+      const t = Date.parse(String(iso));
+      return Number.isFinite(t) ? t : NaN;
+    }
+
+    function clampSeries(series, maxN) {
+      if (!Array.isArray(series)) return [];
+      if (series.length <= maxN) return series;
+      return series.slice(series.length - maxN);
+    }
+
+    const STORAGE_KEY = 'tr_bot_metrics_samples_v1';
+    const MAX_SAMPLES = 720; // 4h at 20s cadence
+
+    function loadSamples() {
+      try {
+        const raw = localStorage.getItem(STORAGE_KEY);
+        if (!raw) return [];
+        const v = JSON.parse(raw);
+        return Array.isArray(v) ? v : [];
+      } catch (_) { return []; }
+    }
+
+    function saveSamples(samples) {
+      try { localStorage.setItem(STORAGE_KEY, JSON.stringify(clampSeries(samples, MAX_SAMPLES))); }
+      catch (_) {}
+    }
+
+    // Rolling samples we build by polling /api/dashboard/summary
+    let samples = loadSamples();
+
+    function sampleFromSummary(data) {
+      const dep = (data && data.dependencies) || {};
+      const redis = dep.redis || {};
+      const pg = dep.postgres || {};
+      const circ = data && data.circuit || {};
+      const trading = data && data.trading || {};
+      const risk = trading && trading.risk || {};
+      const bt = data && data.backtest || {};
+      const lr = bt && bt.last_run || {};
+      return {
+        t: Date.now(),
+        redis_ms: (redis.latency_ms != null ? Number(redis.latency_ms) : null),
+        pg_ms: (pg.latency_ms != null ? Number(pg.latency_ms) : null),
+        circuit_n: (circ.consecutive_losses != null ? Number(circ.consecutive_losses) : null),
+        circuit_m: (circ.max_consecutive_losses != null ? Number(circ.max_consecutive_losses) : null),
+        daily_trades: (risk.daily_trades != null ? Number(risk.daily_trades) : null),
+        max_daily_trades: (risk.max_daily_trades != null ? Number(risk.max_daily_trades) : null),
+        can_trade: (risk.can_trade != null ? (risk.can_trade ? 1 : 0) : null),
+        bt_ret: (lr && lr.total_return_pct != null ? Number(lr.total_return_pct) : null),
+        bt_dd: (lr && lr.max_drawdown_pct != null ? Number(lr.max_drawdown_pct) : null),
+        bt_trades: (lr && lr.trades != null ? Number(lr.trades) : null),
+      };
+    }
+
+    function seriesXY(xs, ys) {
+      const out = [];
+      for (let i = 0; i < xs.length && i < ys.length; i++) {
+        const x = xs[i], y = ys[i];
+        if (!Number.isFinite(x)) continue;
+        if (y == null || !Number.isFinite(Number(y))) continue;
+        out.push({ x, y: Number(y) });
+      }
+      return out;
+    }
+
+    function makeLineChart(canvasId, datasets, yTitle) {
+      const el = $(canvasId);
+      const ctx = el.getContext('2d');
+      return new Chart(ctx, {
+        type: 'line',
+        data: { datasets },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          animation: false,
+          parsing: false,
+          normalized: true,
+          scales: {
+            x: {
+              type: 'time',
+              time: { unit: 'minute' },
+              ticks: { color: '#94a3b8' },
+              grid: { color: 'rgba(148, 163, 184, 0.12)' },
+            },
+            y: {
+              ticks: { color: '#94a3b8' },
+              grid: { color: 'rgba(148, 163, 184, 0.12)' },
+              title: { display: !!yTitle, text: yTitle || '', color: '#94a3b8' },
+            }
+          },
+          plugins: {
+            legend: { labels: { color: '#cbd5e1' } },
+            tooltip: { mode: 'index', intersect: false },
+          },
+          interaction: { mode: 'index', intersect: false },
+          elements: { point: { radius: 0 } },
+        }
+      });
+    }
+
+    // Chart.js time scale needs an adapter; use built-in Intl-based fallback by providing numeric ms + custom labels.
+    // We’ll keep x as linear and format ticks ourselves to avoid extra dependencies.
+    function makeLinearTimeChart(canvasId, datasets, yTitle) {
+      const el = $(canvasId);
+      const ctx = el.getContext('2d');
+      return new Chart(ctx, {
+        type: 'line',
+        data: { datasets },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          animation: false,
+          parsing: false,
+          normalized: true,
+          scales: {
+            x: {
+              type: 'linear',
+              ticks: {
+                color: '#94a3b8',
+                callback: function (v) { return fmtUtc(Number(v)).slice(11, 16); }
+              },
+              grid: { color: 'rgba(148, 163, 184, 0.12)' },
+            },
+            y: {
+              ticks: { color: '#94a3b8' },
+              grid: { color: 'rgba(148, 163, 184, 0.12)' },
+              title: { display: !!yTitle, text: yTitle || '', color: '#94a3b8' },
+            }
+          },
+          plugins: {
+            legend: { labels: { color: '#cbd5e1' } },
+            tooltip: {
+              mode: 'index',
+              intersect: false,
+              callbacks: {
+                title: function (items) {
+                  if (!items || !items.length) return '';
+                  return fmtUtc(Number(items[0].parsed.x));
+                }
+              }
+            },
+          },
+          interaction: { mode: 'index', intersect: false },
+          elements: { point: { radius: 0 } },
+        }
+      });
+    }
+
+    const navChart = makeLinearTimeChart('chart-nav', [
+      { label: 'NAV', data: [], borderColor: '#38bdf8', backgroundColor: 'rgba(56, 189, 248, 0.15)', tension: 0.15 }
+    ], 'USDT');
+
+    const ddChart = makeLinearTimeChart('chart-dd', [
+      { label: 'Drawdown %', data: [], borderColor: '#f59e0b', backgroundColor: 'rgba(245, 158, 11, 0.12)', tension: 0.15 }
+    ], '%');
+
+    const depsChart = makeLinearTimeChart('chart-deps', [
+      { label: 'Redis ms', data: [], borderColor: '#34d399', tension: 0.2 },
+      { label: 'Postgres ms', data: [], borderColor: '#f472b6', tension: 0.2 },
+    ], 'ms');
+
+    const riskChart = makeLinearTimeChart('chart-risk', [
+      { label: 'Trades today', data: [], borderColor: '#a78bfa', tension: 0.0, stepped: true },
+      { label: 'Max trades/day', data: [], borderColor: '#64748b', tension: 0.0, stepped: true },
+      { label: 'Circuit losses', data: [], borderColor: '#fb7185', tension: 0.0, stepped: true },
+      { label: 'Circuit max', data: [], borderColor: '#94a3b8', tension: 0.0, stepped: true },
+      { label: 'Can trade (0/1)', data: [], borderColor: '#38bdf8', tension: 0.0, stepped: true },
+    ], 'count / flag');
+
+    const btChart = makeLinearTimeChart('chart-bt', [
+      { label: 'Return %', data: [], borderColor: '#38bdf8', tension: 0.15 },
+      { label: 'Max DD %', data: [], borderColor: '#f59e0b', tension: 0.15 },
+      { label: 'Trades', data: [], borderColor: '#a78bfa', tension: 0.15, yAxisID: 'y' },
+    ], 'value');
+
+    function updatePersistedEquity(data) {
+      const disp = data && data.equity_history_display;
+      const rawEq = (data && data.equity_history && data.equity_history.points) || [];
+      const eq =
+        disp && Array.isArray(disp.points) && disp.points.length
+          ? disp.points
+          : rawEq;
+      const dropped = disp && disp.outliers_dropped != null ? Number(disp.outliers_dropped) : 0;
+      const navBlurb = $('eq-nav-blurb');
+      if (navBlurb) {
+        if (dropped > 0) {
+          navBlurb.innerHTML =
+            'Outlier-filtered NAV (excluded ' +
+            dropped +
+            ' bad sample(s), same rule as P&amp;L rollups). Raw: <code class="text-slate-400">equity_history.json</code>.';
+        } else {
+          navBlurb.innerHTML =
+            'From <code class="text-slate-400">equity_history.json</code> (persisted).';
+        }
+      }
+      const ddBlurb = $('eq-dd-blurb');
+      if (ddBlurb) {
+        ddBlurb.textContent =
+          dropped > 0
+            ? 'Running peak drawdown on filtered NAV series (left).'
+            : 'Computed from NAV series (persisted, running peak).';
+      }
+
+      const xs = [];
+      const navs = [];
+      for (let i = 0; i < eq.length; i++) {
+        const p = eq[i] || {};
+        const t = toMsFromIso(p.t);
+        const nav = (p.nav != null ? Number(p.nav) : NaN);
+        if (!Number.isFinite(t) || !Number.isFinite(nav)) continue;
+        xs.push(t);
+        navs.push(nav);
+      }
+      navChart.data.datasets[0].data = seriesXY(xs, navs);
+      navChart.update();
+
+      // drawdown
+      let peak = null;
+      const dds = [];
+      for (let i = 0; i < navs.length; i++) {
+        const n = navs[i];
+        peak = (peak == null ? n : Math.max(peak, n));
+        const dd = (peak > 0 ? ((peak - n) / peak) * 100 : 0);
+        dds.push(dd);
+      }
+      ddChart.data.datasets[0].data = seriesXY(xs, dds);
+      ddChart.update();
+
+      const fund = data && data.fund;
+      const fs = fund && fund.state;
+      if (navs.length) {
+        let s =
+          'last=' + navs[navs.length - 1].toFixed(4) + ' @ ' + fmtUtc(xs[xs.length - 1]);
+        if (fs && fs.last_nav != null && Number.isFinite(Number(fs.last_nav))) {
+          s += ' · fund_state=' + Number(fs.last_nav).toFixed(4);
+        }
+        $('nav-last').textContent = s;
+      }
+      if (dds.length) {
+        let s = 'last=' + dds[dds.length - 1].toFixed(2) + '%';
+        if (fs && fs.peak_nav != null && fs.last_nav != null) {
+          const pk = Number(fs.peak_nav);
+          const ln = Number(fs.last_nav);
+          if (pk > 0 && Number.isFinite(ln)) {
+            s += ' · fund_state=' + (((pk - ln) / pk) * 100).toFixed(2) + '%';
+          }
+        }
+        $('dd-last').textContent = s;
+      }
+    }
+
+    function updateRollingCharts() {
+      samples = clampSeries(samples, MAX_SAMPLES);
+      const xs = samples.map(s => Number(s.t));
+
+      depsChart.data.datasets[0].data = seriesXY(xs, samples.map(s => s.redis_ms));
+      depsChart.data.datasets[1].data = seriesXY(xs, samples.map(s => s.pg_ms));
+      depsChart.update();
+
+      riskChart.data.datasets[0].data = seriesXY(xs, samples.map(s => s.daily_trades));
+      riskChart.data.datasets[1].data = seriesXY(xs, samples.map(s => s.max_daily_trades));
+      riskChart.data.datasets[2].data = seriesXY(xs, samples.map(s => s.circuit_n));
+      riskChart.data.datasets[3].data = seriesXY(xs, samples.map(s => s.circuit_m));
+      riskChart.data.datasets[4].data = seriesXY(xs, samples.map(s => s.can_trade));
+      riskChart.update();
+
+      btChart.data.datasets[0].data = seriesXY(xs, samples.map(s => s.bt_ret));
+      btChart.data.datasets[1].data = seriesXY(xs, samples.map(s => s.bt_dd));
+      btChart.data.datasets[2].data = seriesXY(xs, samples.map(s => s.bt_trades));
+      btChart.update();
+
+      const last = samples.length ? samples[samples.length - 1] : null;
+      if (last) {
+        $('deps-last').textContent =
+          'redis=' + (last.redis_ms != null ? last.redis_ms.toFixed(2) + 'ms' : '—') +
+          ' pg=' + (last.pg_ms != null ? last.pg_ms.toFixed(2) + 'ms' : '—');
+        $('risk-last').textContent =
+          'trades=' + (last.daily_trades != null ? last.daily_trades : '—') +
+          '/' + (last.max_daily_trades != null ? last.max_daily_trades : '—') +
+          ' circuit=' + (last.circuit_n != null ? last.circuit_n : '—') +
+          '/' + (last.circuit_m != null ? last.circuit_m : '—') +
+          ' can_trade=' + (last.can_trade != null ? String(last.can_trade) : '—');
+        $('bt-last').textContent =
+          (last.bt_ret != null ? last.bt_ret.toFixed(2) + '% ret' : '— ret') +
+          ' · ' + (last.bt_dd != null ? last.bt_dd.toFixed(2) + '% dd' : '— dd') +
+          ' · ' + (last.bt_trades != null ? String(last.bt_trades) + ' trades' : '— trades');
+      }
+    }
+
+    async function loadSummaryOnce() {
+      const token = sessionStorage.getItem('dashboard_token');
+      const headers = {};
+      if (token) headers['Authorization'] = 'Bearer ' + token;
+      const r = await fetch('/api/dashboard/summary', { headers });
+      if (r.status === 401) {
+        $('auth-gate').classList.remove('hidden');
+        return;
+      }
+      $('auth-gate').classList.add('hidden');
+      if (!r.ok) {
+        $('error-banner').textContent = 'Failed to load: ' + r.status + ' ' + (await r.text());
+        $('error-banner').classList.remove('hidden');
+        return;
+      }
+      $('error-banner').classList.add('hidden');
+      const data = await r.json();
+
+      const dep = data.dependencies || {};
+      const st = data.status;
+      const pgDown = !!(dep.postgres && dep.postgres.ok === false);
+      if (st === 'ready') {
+        $('pill-status').textContent = pgDown ? 'Ready · Postgres down' : 'All deps up';
+        $('pill-status').className = 'px-3 py-1 rounded-full text-xs font-medium ' + (pgDown ? 'bg-amber-900/60 text-amber-200' : 'bg-emerald-900/60 text-emerald-300');
+      } else {
+        $('pill-status').textContent = 'Degraded';
+        $('pill-status').className = 'px-3 py-1 rounded-full text-xs font-medium bg-amber-900/60 text-amber-200';
+      }
+      const rlat = dep.redis && dep.redis.latency_ms != null ? ' ' + dep.redis.latency_ms + 'ms' : '';
+      const plat = dep.postgres && dep.postgres.latency_ms != null ? ' ' + dep.postgres.latency_ms + 'ms' : '';
+      pill($('pill-redis'), dep.redis && dep.redis.ok, 'Redis ' + (dep.redis && dep.redis.ok ? 'OK' : 'down') + rlat);
+      pill($('pill-pg'), dep.postgres && dep.postgres.ok, 'PG ' + (dep.postgres && dep.postgres.ok ? 'OK' : 'down') + plat);
+
+      updatePersistedEquity(data);
+
+      samples.push(sampleFromSummary(data));
+      samples = clampSeries(samples, MAX_SAMPLES);
+      saveSamples(samples);
+      updateRollingCharts();
+    }
+
+    const btn = $('token-save');
+    if (btn) {
+      btn.addEventListener('click', () => {
+        const v = $('token-input').value.trim();
+        if (v) sessionStorage.setItem('dashboard_token', v);
+        $('auth-gate').classList.add('hidden');
+        loadSummaryOnce();
+      });
+    }
+
+    async function safeLoad() {
+      try { await loadSummaryOnce(); }
+      catch (e) {
+        const b = $('error-banner');
+        b.textContent = 'Dashboard load error: ' + (e && e.message ? e.message : String(e));
+        b.classList.remove('hidden');
+      }
+    }
+
+    // Initial render of rolling charts from persisted local samples.
+    updateRollingCharts();
+    safeLoad();
+    setInterval(safeLoad, 20000);
+  </script>
+</body>
+</html>
+
