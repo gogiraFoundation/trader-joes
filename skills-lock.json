@@ -1,0 +1,49 @@
+{
+  "version": 1,
+  "skills": {
+    "insecure-defaults": {
+      "source": "trailofbits/skills",
+      "sourceType": "github",
+      "sourceRef": "5c99c03fb8a9ea568432ecbcba5d86e9f4ac2bf0",
+      "skillPath": "plugins/insecure-defaults (Cursor-adapted)",
+      "computedHash": "95be3143a37606122dcaade8289e4984e45dd22d59d4bd567c10446f8cb85b08"
+    },
+    "secret-serialization": {
+      "source": "getsentry/skills",
+      "sourceType": "github",
+      "skillPath": "skills/secret-serialization/SKILL.md",
+      "computedHash": "fcff1bc1e5f38bdbe9dccccd21a39846bd45e2423307fda971c9cc1e53a39d3b",
+      "sourceRef": "f57ada2d0b640406ea7e25b11d636c530e77c58b"
+    },
+    "property-based-testing": {
+      "source": "trailofbits/skills",
+      "sourceType": "github",
+      "skillPath": "plugins/property-based-testing/skills/property-based-testing/SKILL.md",
+      "computedHash": "9448cacb65c6237a7c22dc59602667177ecae405524079ae9ff92240590b995a",
+      "sourceRef": "5c99c03fb8a9ea568432ecbcba5d86e9f4ac2bf0"
+    },
+    "lookahead-bias-elimination": {
+      "source": "HimanshuJ16/Algo-Trading-Skills",
+      "sourceType": "github",
+      "skillPath": "skills/lookahead-bias-elimination/SKILL.md",
+      "computedHash": "6fdc4d74f7d934f3e9e989cc15cbdaedcf5f31ff988647cabf908468a9fe8cb8",
+      "sourceRef": "925e831b1fbd0bdb7e72200536b97d7e9d191c38"
+    },
+    "docker-compose-patterns": {
+      "source": "docker/skills",
+      "sourceType": "github",
+      "skillPath": "skills/docker-compose-patterns/SKILL.md",
+      "computedHash": "b43f4d71a18159de5868e0f1a352f0dd091bb81fe3ad29b24d79cffce6adfc4c",
+      "sourceRef": "v0.3.1",
+      "sourceCommit": "8afc2c6ef4e0ec2ea8e4ba024d0b884ea930b926"
+    },
+    "docker-destructive-guardrails": {
+      "source": "docker/skills",
+      "sourceType": "github",
+      "skillPath": "skills/docker-destructive-guardrails/SKILL.md",
+      "computedHash": "d64c2b7a497aff8b48e4e70432e274267cc201be67c3be8e2852f506d02f68de",
+      "sourceRef": "v0.3.1",
+      "sourceCommit": "8afc2c6ef4e0ec2ea8e4ba024d0b884ea930b926"
+    }
+  }
+}
