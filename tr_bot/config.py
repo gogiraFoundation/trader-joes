@@ -9,7 +9,8 @@ from typing import Any
 
 from dotenv import load_dotenv
 
-load_dotenv(Path(__file__).resolve().parents[1] / ".env")
+# override=True: .env wins over stale shell exports (e.g. after `source .env`).
+load_dotenv(Path(__file__).resolve().parents[1] / ".env", override=True)
 
 
 def _bool(name: str, default: bool = False) -> bool:
@@ -64,6 +65,7 @@ MAX_TRADES_PER_DAY = _int("MAX_TRADES_PER_DAY", 5)
 
 USE_LLM = _bool("USE_LLM", False)
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
+# OpenAI-compatible base (OpenAI default). For xAI Grok: https://api.x.ai/v1
 OPENAI_BASE_URL = os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
 LLM_MODEL = os.environ.get("LLM_MODEL", "gpt-4o-mini")
 LLM_MIN_CONFIDENCE = _float("LLM_MIN_CONFIDENCE", 0.6)
@@ -73,6 +75,25 @@ LLM_MAX_RETRIES_ON_429 = _int("LLM_MAX_RETRIES_ON_429", 3)
 LLM_BACKOFF_CAP_SECONDS = _float("LLM_BACKOFF_CAP_SECONDS", 16.0)
 # After a 429, skip LLM calls until this elapses (floor; Retry-After header can extend).
 LLM_COOLDOWN_AFTER_429_SECONDS = _float("LLM_COOLDOWN_AFTER_429_SECONDS", 120.0)
+
+# Advisory Supervisor + Fund Manager agents (scheduler / agents-run). LLM never opens trades.
+AGENTS_ENABLED = _bool("AGENTS_ENABLED", False)
+AGENTS_DRY_RUN = _bool("AGENTS_DRY_RUN", True)
+AGENTS_MIN_CONFIDENCE = _float("AGENTS_MIN_CONFIDENCE", 0.7)
+AGENTS_COOLDOWN_SECONDS = _float("AGENTS_COOLDOWN_SECONDS", 3600.0)
+AGENTS_AUTO_PAUSE = _bool("AGENTS_AUTO_PAUSE", False)
+AGENTS_AUTO_RESUME = _bool("AGENTS_AUTO_RESUME", False)
+AGENTS_AUTO_RESET_CIRCUIT = _bool("AGENTS_AUTO_RESET_CIRCUIT", False)
+AGENTS_AUTO_EMIT_PROPOSAL = _bool("AGENTS_AUTO_EMIT_PROPOSAL", False)
+AGENTS_AUTO_APPLY_PROPOSAL = _bool("AGENTS_AUTO_APPLY_PROPOSAL", False)
+AGENTS_AUTO_REBALANCE_SCAN = _bool("AGENTS_AUTO_REBALANCE_SCAN", False)
+AGENTS_HALT_REASON = (
+    os.environ.get("AGENTS_HALT_REASON", "agents_supervisor_pause").strip() or "agents_supervisor_pause"
+)
+AGENTS_MODEL = os.environ.get("AGENTS_MODEL", "").strip()  # empty → LLM_MODEL
+AGENTS_TIMEOUT_SECONDS = _float("AGENTS_TIMEOUT_SECONDS", 30.0)
+SCHEDULER_AGENTS_INTERVAL_SECONDS = _int("SCHEDULER_AGENTS_INTERVAL_SECONDS", 0)
+SCHEDULER_RUN_AGENTS_ON_START = _bool("SCHEDULER_RUN_AGENTS_ON_START", False)
 
 PAPER_TRADING = _bool("PAPER_TRADING", True)
 # Ledger + dashboard cost estimates for closed trades (same bps semantics as BACKTEST_*)
@@ -245,6 +266,8 @@ USE_COINDESK_OHLCV_FROM_DB = _bool("USE_COINDESK_OHLCV_FROM_DB", False)
 COINDESK_OHLCV_DB_TIMEFRAME = os.environ.get("COINDESK_OHLCV_DB_TIMEFRAME", "").strip()
 COINDESK_METRICS_ENABLED = _bool("COINDESK_METRICS_ENABLED", False)
 COINDESK_EXPORT_PARQUET_PATH = os.environ.get("COINDESK_EXPORT_PARQUET_PATH", "").strip()
+# Max rows per INSERT batch for coindesk_ohlcv upserts (pooler/query limits).
+COINDESK_OHLCV_UPSERT_CHUNK = max(1, _int("COINDESK_OHLCV_UPSERT_CHUNK", 800))
 # REST pollers only see the latest tick per instrument; CCSEQ jumps between polls (many trades) — not a gap.
 COINDESK_CCSEQ_POLL_MODE = _bool("COINDESK_CCSEQ_POLL_MODE", True)
 # If false and COINDESK_OHLCV_PATH is set: attempt OHLCV backfill when CCSEQ != previous+1 (streaming / strict).
@@ -368,6 +391,7 @@ CMC_TRAIN_MACRO_ALTCOIN = _bool("CMC_TRAIN_MACRO_ALTCOIN", False)
 CMC_TRAIN_MACRO_PARQUET_PATH = os.environ.get("CMC_TRAIN_MACRO_PARQUET_PATH", "").strip()
 # Extend regime RF with merged cmc_macro_* columns when present (requires macro merge + columns)
 TRAIN_REGIME_MACRO_FEATURES = _bool("TRAIN_REGIME_MACRO_FEATURES", False)
+# Comma-separated CCXT pairs (e.g. SOL/USDT,BTC/USDT); empty falls back to SYMBOL
 TRAIN_EXCHANGE_SYMBOL = os.environ.get("TRAIN_EXCHANGE_SYMBOL", "")
 TRAIN_EXCHANGE_LIMIT = _int("TRAIN_EXCHANGE_LIMIT", 1000)
 TRAIN_MAX_ROWS = _int("TRAIN_MAX_ROWS", 0)
@@ -378,6 +402,12 @@ TRAIN_EXCHANGE_START_MS = os.environ.get("TRAIN_EXCHANGE_START_MS", "").strip()
 TRAIN_EXCHANGE_END_MS = os.environ.get("TRAIN_EXCHANGE_END_MS", "").strip()
 TRAIN_EXCHANGE_FETCH_SLEEP_S = _float("TRAIN_EXCHANGE_FETCH_SLEEP_S", 0.2)
 TRAIN_EXCHANGE_CHUNK_LIMIT = _int("TRAIN_EXCHANGE_CHUNK_LIMIT", 1000)
+TRAIN_EXCHANGE_FAIL_ON_SKIP = _bool("TRAIN_EXCHANGE_FAIL_ON_SKIP", False)
+# Primary pair for sample weighting (empty → first TRAIN_EXCHANGE_SYMBOL token or SYMBOL).
+# Accepts CCXT form (SOL/USDT) or asset tag (SOL_USDT).
+TRAIN_PRIMARY_ASSET = os.environ.get("TRAIN_PRIMARY_ASSET", "").strip()
+# Weight applied to primary-asset rows in RegimeModel.fit (aux rows stay 1.0). <=0 treated as 1.0.
+TRAIN_PRIMARY_SAMPLE_WEIGHT = max(0.0, _float("TRAIN_PRIMARY_SAMPLE_WEIGHT", 1.0))
 
 # Cached training concat (parquet under ARTIFACTS_DIR)
 TRAIN_DATASET_PATH = os.environ.get("TRAIN_DATASET_PATH", "training/datasets/latest.parquet")
@@ -401,6 +431,19 @@ FUND_QUOTE_ASSET = os.environ.get("FUND_QUOTE_ASSET", "USDT")
 QUOTE_USDT_CACHE_SECONDS = _int("QUOTE_USDT_CACHE_SECONDS", 60)
 FUND_REFRESH_SECONDS = _int("FUND_REFRESH_SECONDS", 300)
 TRADING_HALT_FILENAME = os.environ.get("TRADING_HALT_FILENAME", "TRADING_HALTED")
+
+# Portfolio rebalancer (holdings drift / structural lag; trim-only A2)
+REBALANCER_ENABLED = _bool("REBALANCER_ENABLED", False)
+REBALANCER_EXECUTE_TRIMS = _bool("REBALANCER_EXECUTE_TRIMS", False)
+REBALANCE_BAND_PCT = _float("REBALANCE_BAND_PCT", 0.05)
+LAG_LOOKBACK_DAYS = _int("LAG_LOOKBACK_DAYS", 7)
+LAG_RELATIVE_RETURN_THRESHOLD = _float("LAG_RELATIVE_RETURN_THRESHOLD", -0.08)
+LAG_CORR_BREAKDOWN_MAX = _float("LAG_CORR_BREAKDOWN_MAX", 0.40)
+LAG_REQUIRE_MDD_DIVERGENCE = _bool("LAG_REQUIRE_MDD_DIVERGENCE", True)
+REBALANCE_BENCHMARK = os.environ.get("REBALANCE_BENCHMARK", "EQUAL_WEIGHT_PEERS").strip()
+REBALANCE_COOLDOWN_HOURS = _float("REBALANCE_COOLDOWN_HOURS", 24.0)
+REBALANCE_MAX_TRIM_USDT = _float("REBALANCE_MAX_TRIM_USDT", 0.0)
+REBALANCE_HALT_REASON = os.environ.get("REBALANCE_HALT_REASON", "rebalancer_active").strip() or "rebalancer_active"
 
 ADVISORY_USE_REDIS = _bool("ADVISORY_USE_REDIS", True)
 ADVISORY_TTL_SECONDS = _int("ADVISORY_TTL_SECONDS", 3600)
@@ -545,8 +588,7 @@ ADAPTATION_AUTO_APPLY_PAPER = _bool("ADAPTATION_AUTO_APPLY_PAPER", True)
 ADAPTATION_BACKTEST_TIMEOUT_SECONDS = _int("ADAPTATION_BACKTEST_TIMEOUT_SECONDS", 300)
 SCHEDULER_RUN_ADAPTATION_ON_START = _bool("SCHEDULER_RUN_ADAPTATION_ON_START", False)
 
-# Comma-separated overlay keys an LLM proposal may touch (empty = built-in default subset in proposal_validate)
-LLM_PROPOSAL_PARAM_KEYS = os.environ.get("LLM_PROPOSAL_PARAM_KEYS", "").strip()
+# LLM proposal allowlist is hard-coded in tr_bot.strategy.proposal_validate (no env widen).
 DAILY_REPORT_MAX_TRADE_ROWS = _int("DAILY_REPORT_MAX_TRADE_ROWS", 10_000)
 
 # Extended TA + fundamentals (filters / vetoes; regime model still uses base indicators only)
@@ -578,14 +620,55 @@ NOTIFY_ENVIRONMENT = os.environ.get("NOTIFY_ENVIRONMENT", "development")
 DASHBOARD_TOKEN = os.environ.get("DASHBOARD_TOKEN", "").strip()
 # Shown on dashboard banner for remote debugging (e.g. https://bot.example.com)
 PUBLIC_BASE_URL = os.environ.get("PUBLIC_BASE_URL", "").strip().rstrip("/")
+# Rollback switch for the static dashboard UI: "v1" (default) serves index.html;
+# "v2" serves index.v2.html if present, else falls back to v1 automatically.
+_DASHBOARD_UI_RAW = os.environ.get("DASHBOARD_UI", "v1").strip().lower()
+DASHBOARD_UI = _DASHBOARD_UI_RAW if _DASHBOARD_UI_RAW in ("v1", "v2") else "v1"
+
+# Dashboard write actions (reset circuit, pause, force train/backtest, promote): off
+# by default. Requires explicit opt-in + a token (falls back to DASHBOARD_TOKEN).
+DASHBOARD_WRITES_ENABLED = _bool("DASHBOARD_WRITES_ENABLED", False)
+DASHBOARD_WRITE_TOKEN = os.environ.get("DASHBOARD_WRITE_TOKEN", "").strip()
 
 # Ops: heartbeat stale if last_loop older than this multiple of POLL_SECONDS
 HEARTBEAT_STALE_POLL_MULTIPLIER = _int("HEARTBEAT_STALE_POLL_MULTIPLIER", 3)
-# Rolling equity/NAV samples for dashboard sparkline
-MAX_EQUITY_HISTORY_POINTS = _int("MAX_EQUITY_HISTORY_POINTS", 288)
+# Rolling equity/NAV samples for dashboard sparkline / Metrics NAV chart.
+# Default 2016 ≈ 7 days at POLL_SECONDS=300 (5m); UI still filters by timestamp.
+MAX_EQUITY_HISTORY_POINTS = _int("MAX_EQUITY_HISTORY_POINTS", 2016)
 
 # Throttle DEPENDENCIES_DEGRADED alerts (separate from NOTIFY_MIN_INTERVAL_SECONDS)
 NOTIFY_DEPS_INTERVAL_SECONDS = _float("NOTIFY_DEPS_INTERVAL_SECONDS", 300.0)
+
+# Strategy engine: legacy (mean-reversion) | smc | shadow (live: trade legacy, log SMC)
+_STRATEGY_ENGINE_RAW = os.environ.get("STRATEGY_ENGINE", "legacy").strip().lower()
+STRATEGY_ENGINE = (
+    _STRATEGY_ENGINE_RAW
+    if _STRATEGY_ENGINE_RAW in ("legacy", "smc", "shadow")
+    else "legacy"
+)
+SMC_MIN_TRADE_SCORE = _float("SMC_MIN_TRADE_SCORE", 65.0)
+SMC_MIN_SMC_FACTORS = _int("SMC_MIN_SMC_FACTORS", 2)
+SMC_HTF_TIMEFRAME = os.environ.get("SMC_HTF_TIMEFRAME", "4h").strip() or "4h"
+SMC_PRIMARY_TIMEFRAME = os.environ.get("SMC_PRIMARY_TIMEFRAME", "1h").strip() or "1h"
+SMC_ENTRY_TIMEFRAME = os.environ.get("SMC_ENTRY_TIMEFRAME", "15m").strip() or "15m"
+SMC_EXEC_TIMEFRAME = os.environ.get("SMC_EXEC_TIMEFRAME", "5m").strip() or "5m"
+_EXIT_MODE_RAW = os.environ.get("EXIT_MODE", "atr").strip().lower()
+EXIT_MODE = _EXIT_MODE_RAW if _EXIT_MODE_RAW in ("atr", "structural", "hybrid") else "atr"
+_EXIT_POLICY_RAW = os.environ.get("EXIT_POLICY", "software_polled").strip().lower()
+EXIT_POLICY = (
+    _EXIT_POLICY_RAW
+    if _EXIT_POLICY_RAW in ("software_polled", "exchange_native")
+    else "software_polled"
+)
+_BACKTEST_EXIT_POLICY_RAW = os.environ.get("BACKTEST_EXIT_POLICY", "").strip().lower()
+BACKTEST_EXIT_POLICY = (
+    _BACKTEST_EXIT_POLICY_RAW
+    if _BACKTEST_EXIT_POLICY_RAW in ("software_polled", "exchange_native")
+    else EXIT_POLICY
+)
+SMC_PROMOTION_MIN_PF = _optional_float("SMC_PROMOTION_MIN_PF")
+SMC_PROMOTION_MAX_DD_PCT = _optional_float("SMC_PROMOTION_MAX_DD_PCT")
+PROMOTION_REQUIRE_COMPARATOR = _bool("PROMOTION_REQUIRE_COMPARATOR", False)
 
 # Deployment tier selects which pointer file is read: artifacts/deployment/<tier>_active.json
 _DEPLOYMENT_TIER_RAW = os.environ.get("DEPLOYMENT_TIER", "").strip().lower()
@@ -601,10 +684,26 @@ CANARY_RISK_MULTIPLIER = _float("CANARY_RISK_MULTIPLIER", 1.0)
 CANARY_MAX_NOTIONAL_USDT = _float("CANARY_MAX_NOTIONAL_USDT", 0.0)
 CANARY_SYMBOLS = os.environ.get("CANARY_SYMBOLS", "").strip()
 
-from tr_bot.strategy.profile import apply_profile_overlay
+# Live order safety: hard notional cap (USDT) and quote-balance reserve (bps of estimated cost).
+# LIVE_MAX_NOTIONAL_USDT > 0 is required for live_canary / live_full (see runtime_validation).
+LIVE_MAX_NOTIONAL_USDT = max(0.0, _float("LIVE_MAX_NOTIONAL_USDT", 0.0))
+LIVE_BALANCE_RESERVE_BPS = max(0.0, _float("LIVE_BALANCE_RESERVE_BPS", 20.0))
+# Paper notional cap (USDT); 0 = disabled. Bounds fee drag when ATR is tight.
+PAPER_MAX_NOTIONAL_USDT = max(0.0, _float("PAPER_MAX_NOTIONAL_USDT", 0.0))
+# Skip new entries when ATR/close < this fraction (0.002 = 0.20%). 0 = disabled.
+# Fee/R soak: ~3× round-trip at 7.5 bps taker ≈ 0.0045 (see docs/operations.md).
+MIN_ATR_PCT = max(0.0, _float("MIN_ATR_PCT", 0.0))
+# Max concurrent strategy opens across the portfolio. 0 = unlimited. Paper soak: 1.
+MAX_OPEN_POSITIONS = max(0, _int("MAX_OPEN_POSITIONS", 0))
+# Inter-cycle REST stop monitor interval (seconds); strategy loop still uses POLL_SECONDS.
+EXIT_WATCHDOG_INTERVAL_S = max(1.0, _float("EXIT_WATCHDOG_INTERVAL_S", 5.0))
+
+# Late import: profile overlay reads module-level settings defined above.
+from tr_bot.strategy.profile import active_config_hash, apply_profile_overlay  # noqa: E402
 
 # Optional overlay from artifacts/strategy_profiles/<profile_id>.json
 ACTIVE_STRATEGY_PROFILE_ID = apply_profile_overlay(sys.modules[__name__])
+ACTIVE_STRATEGY_CONFIG_HASH = active_config_hash(sys.modules[__name__])
 
 _es_post = str(EXECUTION_STYLE).strip().lower()
 EXECUTION_STYLE = _es_post if _es_post in ("market", "twap") else "market"
@@ -681,10 +780,20 @@ def effective_tier_overrides() -> dict[str, Any]:
 STRATEGY_DAILY_ROLLUP_ENABLED = _bool("STRATEGY_DAILY_ROLLUP_ENABLED", False)
 
 # Strategy promotion gates (python -m tr_bot.managers strategy-evaluate / strategy-promote)
-PROMOTION_MIN_TRADES = _int("PROMOTION_MIN_TRADES", 20)
-PROMOTION_MIN_CALENDAR_DAYS = _int("PROMOTION_MIN_CALENDAR_DAYS", 5)
+PROMOTION_MIN_TRADES = _int("PROMOTION_MIN_TRADES", 50)
+PROMOTION_MIN_CALENDAR_DAYS = _int("PROMOTION_MIN_CALENDAR_DAYS", 14)
 PROMOTION_MAX_EQUITY_DRAWDOWN_PCT = _float("PROMOTION_MAX_EQUITY_DRAWDOWN_PCT", 0.25)
-PROMOTION_MIN_PROFIT_FACTOR = _optional_float("PROMOTION_MIN_PROFIT_FACTOR")
+# Default PF floor 1.15 when unset (was None / optional). Explicit env still wins.
+_PROMOTION_PF_RAW = _optional_float("PROMOTION_MIN_PROFIT_FACTOR")
+PROMOTION_MIN_PROFIT_FACTOR = 1.15 if _PROMOTION_PF_RAW is None else float(_PROMOTION_PF_RAW)
 PROMOTION_COOLDOWN_HOURS = _float("PROMOTION_COOLDOWN_HOURS", 168.0)
 PROMOTION_FROZEN = _bool("PROMOTION_FROZEN", False)
 PROMOTION_BREAK_COOLDOWN = _bool("PROMOTION_BREAK_COOLDOWN", False)
+# Prefer exact profile_id (+ profile_hash when present) attribution for promotion.
+PROMOTION_STRICT_LEDGER_FILTER = _bool("PROMOTION_STRICT_LEDGER_FILTER", True)
+PROMOTION_BOOTSTRAP_ENABLED = _bool("PROMOTION_BOOTSTRAP_ENABLED", False)
+PROMOTION_BOOTSTRAP_BLOCK_SIZE = _int("PROMOTION_BOOTSTRAP_BLOCK_SIZE", 5)
+PROMOTION_BOOTSTRAP_RESAMPLES = _int("PROMOTION_BOOTSTRAP_RESAMPLES", 2000)
+PROMOTION_BOOTSTRAP_ALPHA = _float("PROMOTION_BOOTSTRAP_ALPHA", 0.05)
+PROMOTION_MIN_EXPECTANCY_USDT = _optional_float("PROMOTION_MIN_EXPECTANCY_USDT")
+PROMOTION_BOOTSTRAP_MIN_PF_LOWER = _optional_float("PROMOTION_BOOTSTRAP_MIN_PF_LOWER")
