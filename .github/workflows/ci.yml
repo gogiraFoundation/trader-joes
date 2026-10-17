@@ -1,0 +1,58 @@
+# tr_bot CI: lint, type-check, test. Paper mode only; no secrets.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    name: ruff / pyright / pytest
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      # Real switches from tr_bot/config.py + skills.md (not .env*).
+      # PAPER_TRADING defaults true; keys empty so paper path does not attach exchange credentials.
+      PAPER_TRADING: "true"
+      DEPLOYMENT_TIER: paper
+      BINANCE_API_KEY: ""
+      BINANCE_SECRET: ""
+      PYTHONUNBUFFERED: "1"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install -r requirements-dev.txt
+          pip install ruff pyright
+
+      - name: Ruff
+        run: ruff check .
+
+      - name: Pyright
+        run: pyright
+
+      - name: Pytest
+        run: pytest tests/
