@@ -179,15 +179,26 @@ def call_ccxt_with_retries(
             if attempt == n - 1:
                 raise
             delay = sleep_seconds_for_transient(kind, exchange, attempt)
-            logger.warning(
-                "%s network %s (%s) attempt %s/%s; sleeping %.1fs",
-                context or "ccxt",
-                type(e).__name__,
-                kind,
-                attempt + 1,
-                n,
-                delay,
-            )
+            if kind == "transient_network":
+                logger.debug(
+                    "%s network %s (%s) attempt %s/%s; sleeping %.1fs",
+                    context or "ccxt",
+                    type(e).__name__,
+                    kind,
+                    attempt + 1,
+                    n,
+                    delay,
+                )
+            else:
+                logger.warning(
+                    "%s network %s (%s) attempt %s/%s; sleeping %.1fs",
+                    context or "ccxt",
+                    type(e).__name__,
+                    kind,
+                    attempt + 1,
+                    n,
+                    delay,
+                )
             time.sleep(delay)
     assert last_exc is not None
     raise last_exc

@@ -141,6 +141,10 @@ def run_preflight_checks() -> dict[str, Any]:
     for e in config.coindesk_runtime_validation_errors():
         errors.append(e)
 
+    from tr_bot.runtime_validation import validate_runtime_config
+
+    errors.extend(validate_runtime_config())
+
     if config.COINDESK_REFERENCE_CHECK_ENABLED and config.COINDESK_API_KEY.strip():
         try:
             from tr_bot.coindesk.reference import validate_configured_instruments

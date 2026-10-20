@@ -7,18 +7,24 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, Depends, Header, HTTPException
-from fastapi.responses import FileResponse
+from fastapi import APIRouter, Depends, Header, HTTPException, Query
+from fastapi.responses import FileResponse, Response
 
 from tr_bot import config
 from tr_bot.fees import default_backtest_fee_bps
 from tr_bot.circuit_breaker import read_circuit_state_snapshot
+from tr_bot.dashboard_alerts import build_alerts
 from tr_bot.health_checks import check_postgres, check_redis, overall_readiness_ok
 from tr_bot.ops_state import ops_view_for_api, read_equity_history, read_trading_snapshot
 from tr_bot.backtest.dashboard_enrich import enrich_backtest_last_run_for_dashboard
 from tr_bot.backtest.last_run import read_backtest_last_run
-from tr_bot.dashboard_pnl import build_equity_history_display_payload, build_pnl_dashboard_payload
+from tr_bot.dashboard_pnl import (
+    build_equity_history_display_payload,
+    build_metrics_dashboard_payload,
+    build_pnl_dashboard_payload,
+)
 from tr_bot.promotion.dashboard_info import build_strategy_promotion_dashboard_payload
+from tr_bot.trade_ledger import filter_trades, trades_to_csv
 from tr_bot.training.dashboard_info import build_training_dashboard_payload
 from tr_bot.startup.pipeline import read_startup_last_run
 
@@ -91,6 +97,8 @@ def _sanitized_config() -> dict[str, Any]:
         "paper_trading": config.PAPER_TRADING,
         "risk_per_trade": config.RISK_PER_TRADE,
         "max_trades_per_day": config.MAX_TRADES_PER_DAY,
+        "max_open_positions": int(getattr(config, "MAX_OPEN_POSITIONS", 0) or 0),
+        "min_atr_pct": float(getattr(config, "MIN_ATR_PCT", 0.0) or 0.0),
         "poll_seconds": config.POLL_SECONDS,
         "circuit_breaker_max_consecutive_losses": config.CIRCUIT_BREAKER_MAX_CONSECUTIVE_LOSSES,
         "managers_enabled": config.MANAGERS_ENABLED,
@@ -114,11 +122,18 @@ def _sanitized_config() -> dict[str, Any]:
         "use_fundamentals_filter": config.USE_FUNDAMENTALS_FILTER,
         "max_drawdown_pct": config.MAX_DRAWDOWN_PCT,
         "deployment_tier": config.DEPLOYMENT_TIER,
+        "strategy_engine": str(getattr(config, "STRATEGY_ENGINE", "legacy") or "legacy"),
+        "smc_min_trade_score": float(getattr(config, "SMC_MIN_TRADE_SCORE", 65)),
+        "exit_mode": str(getattr(config, "EXIT_MODE", "atr") or "atr"),
         "effective_tier_overrides": config.effective_tier_overrides(),
         "active_strategy_profile_id": config.ACTIVE_STRATEGY_PROFILE_ID or None,
         "canary_risk_multiplier": config.CANARY_RISK_MULTIPLIER,
         "canary_max_notional_usdt": config.CANARY_MAX_NOTIONAL_USDT,
         "canary_symbols_configured": bool((config.CANARY_SYMBOLS or "").strip()),
+        "live_max_notional_usdt": float(getattr(config, "LIVE_MAX_NOTIONAL_USDT", 0.0) or 0.0),
+        "live_balance_reserve_bps": float(getattr(config, "LIVE_BALANCE_RESERVE_BPS", 0.0) or 0.0),
+        "exit_policy": str(getattr(config, "EXIT_POLICY", "software_polled") or "software_polled"),
+        "exit_watchdog_interval_s": float(getattr(config, "EXIT_WATCHDOG_INTERVAL_S", 5.0) or 5.0),
         "paper_equity_usdt": config.PAPER_EQUITY_USDT,
         "fund_quote_asset": config.FUND_QUOTE_ASSET,
         "fund_refresh_seconds": config.FUND_REFRESH_SECONDS,
@@ -136,6 +151,8 @@ def _sanitized_config() -> dict[str, Any]:
         "cmc_fear_greed_ttl_s": config.CMC_FEAR_GREED_TTL_S,
         "cmc_altcoin_season_enabled": config.CMC_ALTCOIN_SEASON_ENABLED,
         "cmc_altcoin_season_ttl_s": config.CMC_ALTCOIN_SEASON_TTL_S,
+        "dashboard_writes_enabled": config.DASHBOARD_WRITES_ENABLED,
+        "dashboard_ui": config.DASHBOARD_UI,
     }
 
 
@@ -149,6 +166,24 @@ def _portfolio_payload() -> dict[str, Any]:
         return {"ok": False, "error": str(e), "weights": {}}
 
 
+def _fund_state_with_drawdown(st: Any) -> dict[str, Any] | None:
+    """Serialize FundState and attach authoritative positive drawdown_pct."""
+    if st is None:
+        return None
+    out = asdict(st)
+    try:
+        peak = float(st.peak_nav)
+        last = float(st.last_nav)
+    except (TypeError, ValueError, AttributeError):
+        out["drawdown_pct"] = None
+        return out
+    if peak <= 0:
+        out["drawdown_pct"] = 0.0
+    else:
+        out["drawdown_pct"] = round(max(0.0, (peak - last) / peak) * 100.0, 4)
+    return out
+
+
 def _fund_payload() -> dict[str, Any]:
     if not config.MANAGERS_ENABLED:
         return {"enabled": False}
@@ -160,7 +195,7 @@ def _fund_payload() -> dict[str, Any]:
         return {
             "enabled": True,
             "halt_file": fund.manual_halt_file_active(),
-            "state": asdict(st) if st else None,
+            "state": _fund_state_with_drawdown(st),
         }
     except Exception as e:
         return {"enabled": True, "error": str(e)}
@@ -212,6 +247,61 @@ def _best_fit_winner_path() -> Path:
     return Path(config.ARTIFACTS_DIR).resolve() / "sweep_best_fit" / "winner.json"
 
 
+def _strategy_engine_status_payload() -> dict[str, Any]:
+    """SMC/legacy engine status + optional compare / go-no-go artifacts."""
+    root = Path(config.ARTIFACTS_DIR).resolve()
+    compare_path = root / "training" / "backtest_compare.json"
+    go_path = root / "research" / "smc_go_no_go.json"
+    compare = None
+    go = None
+    if compare_path.is_file():
+        try:
+            compare = json.loads(compare_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            compare = {"error": "unreadable"}
+    if go_path.is_file():
+        try:
+            go = json.loads(go_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            go = {"error": "unreadable"}
+    # Shadow agreement from recent decision audit if present
+    agreement = None
+    audit_raw = (config.DECISION_AUDIT_JSONL_PATH or "").strip()
+    if audit_raw:
+        ap = Path(audit_raw)
+        if not ap.is_absolute():
+            ap = root / audit_raw
+        if ap.is_file():
+            try:
+                lines = ap.read_text(encoding="utf-8").strip().splitlines()[-30:]
+                agree = 0
+                total = 0
+                for line in lines:
+                    rec = json.loads(line)
+                    bys = rec.get("by_symbol") or {}
+                    for _sym, view in bys.items():
+                        sh = view.get("shadow") if isinstance(view, dict) else None
+                        if not isinstance(sh, dict):
+                            continue
+                        total += 1
+                        leg = (sh.get("legacy") or {}).get("decision")
+                        smc = (sh.get("smc") or {}).get("decision")
+                        if leg == smc:
+                            agree += 1
+                if total:
+                    agreement = {"pairs": total, "agree": agree, "rate": round(agree / total, 4)}
+            except (OSError, json.JSONDecodeError, TypeError, ValueError):
+                agreement = None
+    return {
+        "strategy_engine": str(getattr(config, "STRATEGY_ENGINE", "legacy") or "legacy"),
+        "smc_min_trade_score": float(getattr(config, "SMC_MIN_TRADE_SCORE", 65)),
+        "exit_mode": str(getattr(config, "EXIT_MODE", "atr") or "atr"),
+        "backtest_compare": compare,
+        "smc_go_no_go": go,
+        "shadow_agreement": agreement,
+    }
+
+
 def require_dashboard_token(
     authorization: str | None = Header(None),
     x_dashboard_token: str | None = Header(None, alias="X-Dashboard-Token"),
@@ -229,20 +319,70 @@ def require_dashboard_token(
 
 
 @router.get("/summary")
-def dashboard_summary(_: None = Depends(require_dashboard_token)) -> dict[str, Any]:
+def dashboard_summary(
+    sections: str | None = Query(
+        None,
+        description=(
+            "Optional comma-separated section keys. When omitted or empty, "
+            "returns the full payload. Always includes status and dependencies."
+        ),
+    ),
+    _: None = Depends(require_dashboard_token),
+) -> dict[str, Any]:
     redis_info = check_redis(config.REDIS_URL)
     pg_info = check_postgres(config.DATABASE_URL)
     req_pg = config.readiness_require_postgres()
     ready_ok = overall_readiness_ok(redis_info, pg_info, require_postgres=req_pg)
 
-    snap = read_circuit_state_snapshot()
-    m = snap.get("max_consecutive_losses") or config.CIRCUIT_BREAKER_MAX_CONSECUTIVE_LOSSES
-    n = snap.get("consecutive_losses")
-    tripped = snap.get("tripped")
-    if tripped is None and n is not None:
-        tripped = n >= m
+    wanted = _parse_summary_sections(sections)
 
-    return {
+    def need(name: str) -> bool:
+        return wanted is None or name in wanted
+
+    # Lazy builders: only run expensive work when the section is requested.
+    circuit_payload: dict[str, Any] | None = None
+    ops_payload: dict[str, Any] | None = None
+    fund_payload: dict[str, Any] | None = None
+    pnl_payload: dict[str, Any] | None = None
+    strategy_promotion_payload: dict[str, Any] | None = None
+
+    def get_circuit() -> dict[str, Any]:
+        nonlocal circuit_payload
+        if circuit_payload is None:
+            snap = read_circuit_state_snapshot()
+            m = snap.get("max_consecutive_losses") or config.CIRCUIT_BREAKER_MAX_CONSECUTIVE_LOSSES
+            n = snap.get("consecutive_losses")
+            tripped = snap.get("tripped")
+            if tripped is None and n is not None:
+                tripped = n >= m
+            circuit_payload = {**snap, "tripped": tripped}
+        return circuit_payload
+
+    def get_ops() -> dict[str, Any]:
+        nonlocal ops_payload
+        if ops_payload is None:
+            ops_payload = ops_view_for_api()
+        return ops_payload
+
+    def get_fund() -> dict[str, Any]:
+        nonlocal fund_payload
+        if fund_payload is None:
+            fund_payload = _fund_payload()
+        return fund_payload
+
+    def get_pnl() -> dict[str, Any]:
+        nonlocal pnl_payload
+        if pnl_payload is None:
+            pnl_payload = build_pnl_dashboard_payload()
+        return pnl_payload
+
+    def get_strategy_promotion() -> dict[str, Any]:
+        nonlocal strategy_promotion_payload
+        if strategy_promotion_payload is None:
+            strategy_promotion_payload = build_strategy_promotion_dashboard_payload()
+        return strategy_promotion_payload
+
+    out: dict[str, Any] = {
         "status": "ready" if ready_ok else "degraded",
         "dependencies": {
             "redis": redis_info,
@@ -252,32 +392,155 @@ def dashboard_summary(_: None = Depends(require_dashboard_token)) -> dict[str, A
                 "mode": config.READINESS_MODE,
             },
         },
-        "ops": ops_view_for_api(),
-        "equity_history": read_equity_history(),
-        "equity_history_display": build_equity_history_display_payload(),
-        "trading": read_trading_snapshot(),
-        "config": _sanitized_config(),
-        "portfolio": _portfolio_payload(),
-        "fund": _fund_payload(),
-        "best_fit": _best_fit_payload(),
-        "circuit": {
-            **snap,
-            "tripped": tripped,
-        },
-        "training": build_training_dashboard_payload(),
-        "backtest": _backtest_payload(),
-        "pnl": build_pnl_dashboard_payload(),
-        "scheduler": _scheduler_payload(),
-        "strategy_promotion": build_strategy_promotion_dashboard_payload(),
-        "startup_pipeline": read_startup_last_run(),
-        "coindesk_asset_top_list": _coindesk_asset_top_list_payload(),
     }
+
+    agents_payload: dict[str, Any] | None = None
+
+    def get_agents() -> dict[str, Any]:
+        nonlocal agents_payload
+        if agents_payload is None:
+            from tr_bot.agents.runner import read_agents_dashboard_payload
+
+            agents_payload = read_agents_dashboard_payload()
+        return agents_payload
+
+    if need("alerts"):
+        # Alerts always consider last agent briefs (cheap file reads).
+        out["alerts"] = build_alerts(
+            circuit=get_circuit(),
+            fund=get_fund(),
+            ops=get_ops(),
+            pnl=get_pnl(),
+            strategy_promotion=get_strategy_promotion(),
+            max_drawdown_pct=config.MAX_DRAWDOWN_PCT,
+            agents=get_agents(),
+        )
+    if need("ops"):
+        out["ops"] = get_ops()
+    if need("equity_history"):
+        out["equity_history"] = read_equity_history()
+    if need("equity_history_display"):
+        out["equity_history_display"] = build_equity_history_display_payload()
+    if need("metrics"):
+        out["metrics"] = build_metrics_dashboard_payload(fund=get_fund())
+    if need("trading"):
+        out["trading"] = read_trading_snapshot()
+    if need("config"):
+        out["config"] = _sanitized_config()
+    if need("strategy_engine_status"):
+        out["strategy_engine_status"] = _strategy_engine_status_payload()
+    if need("portfolio"):
+        out["portfolio"] = _portfolio_payload()
+    if need("fund"):
+        out["fund"] = get_fund()
+    if need("best_fit"):
+        out["best_fit"] = _best_fit_payload()
+    if need("circuit"):
+        out["circuit"] = get_circuit()
+    if need("training"):
+        out["training"] = build_training_dashboard_payload()
+    if need("backtest"):
+        out["backtest"] = _backtest_payload()
+    if need("pnl"):
+        out["pnl"] = get_pnl()
+    if need("scheduler"):
+        out["scheduler"] = _scheduler_payload()
+    if need("strategy_promotion"):
+        out["strategy_promotion"] = get_strategy_promotion()
+    if need("startup_pipeline"):
+        out["startup_pipeline"] = read_startup_last_run()
+    if need("coindesk_asset_top_list"):
+        out["coindesk_asset_top_list"] = _coindesk_asset_top_list_payload()
+    if need("agents"):
+        out["agents"] = get_agents()
+
+    return out
+
+
+_SUMMARY_SECTION_KEYS = frozenset(
+    {
+        "alerts",
+        "ops",
+        "equity_history",
+        "equity_history_display",
+        "metrics",
+        "trading",
+        "config",
+        "strategy_engine_status",
+        "portfolio",
+        "fund",
+        "best_fit",
+        "circuit",
+        "training",
+        "backtest",
+        "pnl",
+        "scheduler",
+        "strategy_promotion",
+        "startup_pipeline",
+        "coindesk_asset_top_list",
+        "agents",
+    }
+)
+
+
+def _parse_summary_sections(sections: str | None) -> frozenset[str] | None:
+    """Return None for full payload, else the requested section names.
+
+    Unknown names raise HTTP 400. Empty / whitespace-only means full payload.
+    """
+    if sections is None:
+        return None
+    raw = str(sections).strip()
+    if not raw:
+        return None
+    names = [p.strip() for p in raw.split(",") if p.strip()]
+    if not names:
+        return None
+    unknown = sorted({n for n in names if n not in _SUMMARY_SECTION_KEYS})
+    if unknown:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown summary section(s): {', '.join(unknown)}",
+        )
+    return frozenset(names)
 
 
 @router.get("/strategy/status")
 def dashboard_strategy_status(_: None = Depends(require_dashboard_token)) -> dict[str, Any]:
     """Read-only strategy promotion snapshot (pointers, gates, thresholds)."""
     return build_strategy_promotion_dashboard_payload()
+
+
+@router.get("/trades")
+def dashboard_trades(
+    symbol: str | None = None,
+    side: str | None = None,
+    outcome: str | None = None,
+    from_: str | None = Query(None, alias="from"),
+    to: str | None = None,
+    limit: int = 50,
+    offset: int = 0,
+    format: str | None = None,
+    _: None = Depends(require_dashboard_token),
+) -> Any:
+    """Filtered/paginated closed-trades ledger; add `format=csv` to export."""
+    result = filter_trades(
+        symbol=symbol,
+        side=side,
+        outcome=outcome,
+        from_ts=from_,
+        to_ts=to,
+        limit=limit,
+        offset=offset,
+    )
+    if (format or "").strip().lower() == "csv":
+        csv_text = trades_to_csv(result["rows"])
+        return Response(
+            content=csv_text,
+            media_type="text/csv",
+            headers={"Content-Disposition": "attachment; filename=trades.csv"},
+        )
+    return result
 
 
 @router.get("/best-fit/winner.json")

@@ -10,7 +10,7 @@ from tr_bot.fees import default_backtest_fee_bps, live_fee_mode_summary
 from tr_bot.backtest.dashboard_enrich import enrich_backtest_last_run_for_dashboard
 from tr_bot.backtest.last_run import read_backtest_last_run
 from tr_bot.ops_state import read_equity_history
-from tr_bot.trade_ledger import read_recent_trades
+from tr_bot.trade_ledger import closed_trade_stats, read_recent_trades, summarize_trades
 
 
 def _max_drawdown_pct_from_navs(navs: list[float]) -> float | None:
@@ -174,54 +174,7 @@ def _vs_initial() -> dict[str, Any]:
 
 
 def _trade_summary(trades: list[dict[str, Any]]) -> dict[str, Any]:
-    if not trades:
-        return {
-            "closed_trades": 0,
-            "wins": 0,
-            "losses": 0,
-            "win_rate_pct": None,
-            "net_positive_pct": None,
-            "tp_stop_win_rate_pct": None,
-            "net_pnl_win_rate_pct": None,
-            "sum_net_pnl_usdt": 0.0,
-            "sum_fee_usdt": 0.0,
-        }
-    wins = losses = 0
-    net_sum = fee_sum = 0.0
-    net_positive = 0
-    for t in trades:
-        oc = str(t.get("outcome", "")).lower()
-        if oc == "win":
-            wins += 1
-        elif oc == "loss":
-            losses += 1
-        try:
-            net = float(t.get("net_pnl_usdt", 0) or 0)
-            net_sum += net
-            if net > 0:
-                net_positive += 1
-        except (TypeError, ValueError):
-            pass
-        try:
-            fee_sum += float(t.get("fee_usdt", 0) or 0)
-        except (TypeError, ValueError):
-            pass
-    n = wins + losses
-    wr = (wins / n * 100.0) if n else None
-    nclosed = len(trades)
-    np_pct = (net_positive / nclosed * 100.0) if nclosed else None
-    return {
-        "closed_trades": nclosed,
-        "wins": wins,
-        "losses": losses,
-        # TP/stop outcome (OpenPosition.check_bar), not net P&L after fees
-        "win_rate_pct": round(wr, 2) if wr is not None else None,
-        "tp_stop_win_rate_pct": round(wr, 2) if wr is not None else None,
-        "net_positive_pct": round(np_pct, 2) if np_pct is not None else None,
-        "net_pnl_win_rate_pct": round(np_pct, 2) if np_pct is not None else None,
-        "sum_net_pnl_usdt": round(net_sum, 6),
-        "sum_fee_usdt": round(fee_sum, 6),
-    }
+    return summarize_trades(trades, scope="recent_subset")
 
 
 def build_equity_history_display_payload() -> dict[str, Any]:
@@ -241,6 +194,133 @@ def build_equity_history_display_payload() -> dict[str, Any]:
         "display_point_count": len(display),
         "outliers_dropped": dropped,
     }
+
+
+def _parse_iso_utc(value: Any) -> float | None:
+    """Return epoch seconds for an ISO timestamp, or None if unparseable."""
+    if value is None:
+        return None
+    s = str(value).strip()
+    if not s:
+        return None
+    try:
+        # Accept both Z and +00:00; treat naive as UTC.
+        if s.endswith("Z"):
+            s = s[:-1] + "+00:00"
+        from datetime import datetime, timezone
+
+        dt = datetime.fromisoformat(s)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.timestamp()
+    except (TypeError, ValueError):
+        return None
+
+
+def build_drawdown_history_payload(
+    *,
+    points: list[dict[str, Any]] | None = None,
+    peak_anchor: float | None = None,
+    last_nav: float | None = None,
+    as_of_utc: str | None = None,
+) -> dict[str, Any]:
+    """
+    Fund-peak-anchored drawdown series for Metrics charts.
+
+    Uses existing equity timestamps (no synthetic peak NAV point). Running peak
+    starts at ``max(peak_anchor, first_nav)`` so chart drawdown matches fund state
+    even when equity_history never recorded the historical peak. Appends the latest
+    fund NAV only when its timestamp is newer than the last equity sample.
+    """
+    raw_points = list(points if points is not None else (read_equity_history().get("points") or []))
+    filtered, dropped = _filter_equity_points_for_rollups(raw_points)
+    series = filtered if filtered else raw_points
+
+    nav_pairs: list[tuple[str, float, float | None]] = []
+    for p in series:
+        try:
+            nav = float(p.get("nav", 0))
+        except (TypeError, ValueError):
+            continue
+        if nav <= 0:
+            continue
+        t = str(p.get("t") or "")
+        nav_pairs.append((t, nav, _parse_iso_utc(t)))
+
+    # Append fund last_nav if newer than last equity sample (or series empty).
+    if last_nav is not None and float(last_nav) > 0 and as_of_utc:
+        fund_ts = _parse_iso_utc(as_of_utc)
+        last_eq_ts = nav_pairs[-1][2] if nav_pairs else None
+        if fund_ts is not None and (last_eq_ts is None or fund_ts > last_eq_ts + 1e-6):
+            nav_pairs.append((str(as_of_utc), float(last_nav), fund_ts))
+
+    out_points: list[dict[str, Any]] = []
+    peak: float | None = None
+    if peak_anchor is not None:
+        try:
+            pa = float(peak_anchor)
+            if pa > 0:
+                peak = pa
+        except (TypeError, ValueError):
+            peak = None
+
+    for t, nav, _ts in nav_pairs:
+        if peak is None:
+            peak = nav
+        else:
+            peak = max(peak, nav)
+        dd = 0.0 if peak <= 0 else ((peak - nav) / peak) * 100.0
+        out_points.append({"t": t, "drawdown_pct": round(dd, 4), "nav": nav, "peak": peak})
+
+    current_dd: float | None = None
+    if out_points:
+        current_dd = float(out_points[-1]["drawdown_pct"])
+    elif peak_anchor is not None and last_nav is not None:
+        try:
+            pk = float(peak_anchor)
+            ln = float(last_nav)
+            if pk > 0:
+                current_dd = round(max(0.0, (pk - ln) / pk) * 100.0, 4)
+        except (TypeError, ValueError):
+            current_dd = None
+
+    return {
+        "source": "fund_peak_anchored",
+        "peak_anchor": float(peak_anchor) if peak_anchor is not None else None,
+        "current_drawdown_pct": current_dd,
+        "as_of_utc": as_of_utc,
+        "points": out_points,
+        "outliers_dropped": dropped,
+    }
+
+
+def build_metrics_dashboard_payload(*, fund: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Metrics-page extras nested under ``summary.metrics`` (backward-compatible)."""
+    fund = fund or {}
+    state = fund.get("state") if isinstance(fund.get("state"), dict) else {}
+    peak = state.get("peak_nav")
+    last = state.get("last_nav")
+    as_of = state.get("last_update_utc")
+    try:
+        peak_f = float(peak) if peak is not None else None
+    except (TypeError, ValueError):
+        peak_f = None
+    try:
+        last_f = float(last) if last is not None else None
+    except (TypeError, ValueError):
+        last_f = None
+    dd_hist = build_drawdown_history_payload(
+        peak_anchor=peak_f,
+        last_nav=last_f,
+        as_of_utc=str(as_of) if as_of else None,
+    )
+    # Prefer fund.state.drawdown_pct when present (authoritative current value).
+    if state.get("drawdown_pct") is not None:
+        try:
+            dd_hist["current_drawdown_pct"] = round(float(state["drawdown_pct"]), 4)
+        except (TypeError, ValueError):
+            pass
+    return {"drawdown_history": dd_hist}
 
 
 def build_pnl_dashboard_payload() -> dict[str, Any]:
@@ -301,6 +381,7 @@ def build_pnl_dashboard_payload() -> dict[str, Any]:
 
     recent = read_recent_trades(200)
     summary = _trade_summary(recent)
+    closed_stats = closed_trade_stats(paper=bool(config.PAPER_TRADING))
 
     disclaimer = (
         "Illustrative metrics: ledger uses bar-close fill estimates and configured fee/slippage bps; "
@@ -314,6 +395,7 @@ def build_pnl_dashboard_payload() -> dict[str, Any]:
         "backtest": backtest_row,
         "recent_trades": recent,
         "trade_summary": summary,
+        "closed_trade_stats": closed_stats,
         "cost_assumptions": {
             "live_fee_bps": config.LIVE_FEE_BPS,
             "live_slippage_bps": config.LIVE_SLIPPAGE_BPS,

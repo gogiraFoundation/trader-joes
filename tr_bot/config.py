@@ -621,9 +621,9 @@ DASHBOARD_TOKEN = os.environ.get("DASHBOARD_TOKEN", "").strip()
 # Shown on dashboard banner for remote debugging (e.g. https://bot.example.com)
 PUBLIC_BASE_URL = os.environ.get("PUBLIC_BASE_URL", "").strip().rstrip("/")
 # Rollback switch for the static dashboard UI: "v1" (default) serves index.html;
-# "v2" serves index.v2.html if present, else falls back to v1 automatically.
+# "v2" / "v3" serve index.v{n}.html when present, else fall back v3→v2→v1.
 _DASHBOARD_UI_RAW = os.environ.get("DASHBOARD_UI", "v1").strip().lower()
-DASHBOARD_UI = _DASHBOARD_UI_RAW if _DASHBOARD_UI_RAW in ("v1", "v2") else "v1"
+DASHBOARD_UI = _DASHBOARD_UI_RAW if _DASHBOARD_UI_RAW in ("v1", "v2", "v3") else "v1"
 
 # Dashboard write actions (reset circuit, pause, force train/backtest, promote): off
 # by default. Requires explicit opt-in + a token (falls back to DASHBOARD_TOKEN).

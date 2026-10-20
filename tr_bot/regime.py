@@ -32,9 +32,9 @@ class RegimeModel:
         self.feature_columns_: tuple[str, ...] | None = None
 
     def train(self, df: pd.DataFrame) -> None:
-        X, y = build_regime_xy(df)
+        X, y, sample_weight = build_regime_xy(df)
         self.feature_columns_ = tuple(X.columns)
-        self.model.fit(X, y)
+        self.model.fit(X, y, sample_weight=sample_weight)
 
     def predict(self, df: pd.DataFrame) -> str:
         regime, _confidence = self.predict_with_confidence(df)

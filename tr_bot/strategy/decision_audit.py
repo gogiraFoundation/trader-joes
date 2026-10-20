@@ -12,4 +12,8 @@ Each line is one JSON object:
 
 from __future__ import annotations
 
-DECISION_AUDIT_SCHEMA_VERSION = 1
+DECISION_AUDIT_SCHEMA_VERSION = 2
+
+# schema_version 2 by_symbol entries may include:
+#   legacy / smc / shadow dual views when STRATEGY_ENGINE=shadow
+

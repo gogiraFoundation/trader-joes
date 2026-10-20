@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -69,7 +71,7 @@ class CircuitBreaker:
             max_consecutive_losses or config.CIRCUIT_BREAKER_MAX_CONSECUTIVE_LOSSES
         )
         self.consecutive_losses = 0
-        self._reset_token: int | None = None
+        self._reset_token: str | None = None
         self._load_persisted()
 
     def _load_persisted(self) -> None:
@@ -117,16 +119,48 @@ class CircuitBreaker:
         self._persist()
 
     def _check_reset_file(self) -> None:
-        """Manual reset: create or touch `.circuit_reset` in project root."""
-        path = Path(__file__).resolve().parents[1] / ".circuit_reset"
+        """Consume a nonce written to `.circuit_reset` (see ``reset_for_api``)."""
+        path = _reset_file_path()
         if not path.exists():
             return
-        mtime = int(path.stat().st_mtime)
-        if self._reset_token != mtime:
-            self._reset_token = mtime
-            self.consecutive_losses = 0
-            self._persist()
+        try:
+            token = path.read_text(encoding="utf-8").strip()
+        except OSError as e:
+            logger.warning("Could not read circuit reset marker: %s", e)
+            return
+        if not token or token == self._reset_token:
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            return
+        self._reset_token = token
+        self.consecutive_losses = 0
+        self._persist()
+        try:
+            path.unlink(missing_ok=True)
+        except OSError as e:
+            logger.warning("Could not consume circuit reset marker: %s", e)
 
     def reset(self) -> None:
         self.consecutive_losses = 0
         self._persist()
+
+
+def _reset_file_path() -> Path:
+    return Path(__file__).resolve().parents[1] / ".circuit_reset"
+
+
+def reset_for_api() -> None:
+    """
+    Request a circuit-breaker reset from the dashboard (or CLI) process.
+
+    Writes a unique nonce into `.circuit_reset`. The running engine's
+    `CircuitBreaker` polls that marker via `_check_reset_file`, applies the
+    reset, persists state, then deletes the marker so a leftover file cannot
+    auto-clear the breaker on the next process start.
+    """
+    path = _reset_file_path()
+    nonce = f"{time.time_ns()}-{uuid.uuid4().hex}"
+    path.write_text(nonce + "\n", encoding="utf-8")
+    logger.info("Circuit breaker reset requested (wrote nonce to %s)", path)

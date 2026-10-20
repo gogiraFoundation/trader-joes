@@ -37,6 +37,221 @@ def test_root_serves_dashboard_html(client: TestClient) -> None:
     assert "tr_bot" in r.text
 
 
+def test_root_serves_v1_when_dashboard_ui_v2_but_no_v2_file(client: TestClient) -> None:
+    """Rollback safety net: DASHBOARD_UI=v2 without index.v2.html falls back to v1."""
+    with patch.object(config, "DASHBOARD_UI", "v2"):
+        r = client.get("/", follow_redirects=False)
+    assert r.status_code == 200
+    assert "tr_bot" in r.text
+
+
+def test_dashboard_index_path_prefers_v2_file_when_present(tmp_path: Path) -> None:
+    from tr_bot import health
+
+    v2 = tmp_path / "index.v2.html"
+    v2.write_text("<html>v2</html>", encoding="utf-8")
+    with (
+        patch.object(config, "DASHBOARD_UI", "v2"),
+        patch.object(health, "_DASHBOARD_INDEX_V2", v2),
+    ):
+        assert health._dashboard_index_path() == v2
+
+
+def test_dashboard_index_path_prefers_v3_file_when_present(tmp_path: Path) -> None:
+    from tr_bot import health
+
+    v3 = tmp_path / "index.v3.html"
+    v3.write_text("<html>v3</html>", encoding="utf-8")
+    with (
+        patch.object(config, "DASHBOARD_UI", "v3"),
+        patch.object(health, "_DASHBOARD_INDEX_V3", v3),
+    ):
+        assert health._dashboard_index_path() == v3
+
+
+def test_dashboard_index_path_v3_falls_back_to_v2(tmp_path: Path) -> None:
+    from tr_bot import health
+
+    v2 = tmp_path / "index.v2.html"
+    v2.write_text("<html>v2</html>", encoding="utf-8")
+    missing_v3 = tmp_path / "index.v3.html"
+    with (
+        patch.object(config, "DASHBOARD_UI", "v3"),
+        patch.object(health, "_DASHBOARD_INDEX_V3", missing_v3),
+        patch.object(health, "_DASHBOARD_INDEX_V2", v2),
+    ):
+        assert health._dashboard_index_path() == v2
+
+
+def test_root_serves_v2_when_enabled_and_file_exists(client: TestClient, tmp_path: Path) -> None:
+    from tr_bot import health
+
+    v2 = tmp_path / "index.v2.html"
+    v2.write_text("<html>dashboard v2</html>", encoding="utf-8")
+    with (
+        patch.object(config, "DASHBOARD_UI", "v2"),
+        patch.object(health, "_DASHBOARD_INDEX_V2", v2),
+    ):
+        r = client.get("/", follow_redirects=False)
+    assert r.status_code == 200
+    assert "dashboard v2" in r.text
+
+
+def test_root_serves_v3_when_enabled_and_file_exists(client: TestClient, tmp_path: Path) -> None:
+    from tr_bot import health
+
+    v3 = tmp_path / "index.v3.html"
+    v3.write_text("<html>dashboard v3</html>", encoding="utf-8")
+    with (
+        patch.object(config, "DASHBOARD_UI", "v3"),
+        patch.object(health, "_DASHBOARD_INDEX_V3", v3),
+    ):
+        r = client.get("/", follow_redirects=False)
+    assert r.status_code == 200
+    assert "dashboard v3" in r.text
+
+
+def test_dashboard_index_path_defaults_to_v1() -> None:
+    from tr_bot import health
+
+    with patch.object(config, "DASHBOARD_UI", "v1"):
+        assert health._dashboard_index_path() == health._DASHBOARD_INDEX_V1
+
+
+def test_dashboard_metrics_path_defaults_to_v1() -> None:
+    from tr_bot import health
+
+    with patch.object(config, "DASHBOARD_UI", "v1"):
+        assert health._dashboard_metrics_path() == health._DASHBOARD_METRICS_V1
+
+
+def test_dashboard_metrics_path_prefers_v2_when_present(tmp_path: Path) -> None:
+    from tr_bot import health
+
+    v2 = tmp_path / "metrics.v2.html"
+    v2.write_text("<html>metrics v2</html>", encoding="utf-8")
+    with (
+        patch.object(config, "DASHBOARD_UI", "v2"),
+        patch.object(health, "_DASHBOARD_METRICS_V2", v2),
+    ):
+        assert health._dashboard_metrics_path() == v2
+
+
+def test_dashboard_metrics_path_prefers_v3_when_present(tmp_path: Path) -> None:
+    from tr_bot import health
+
+    v3 = tmp_path / "metrics.v3.html"
+    v3.write_text("<html>metrics v3</html>", encoding="utf-8")
+    with (
+        patch.object(config, "DASHBOARD_UI", "v3"),
+        patch.object(health, "_DASHBOARD_METRICS_V3", v3),
+    ):
+        assert health._dashboard_metrics_path() == v3
+
+
+def test_dashboard_metrics_path_falls_back_when_v2_missing(tmp_path: Path) -> None:
+    from tr_bot import health
+
+    missing = tmp_path / "metrics.v2.html"
+    with (
+        patch.object(config, "DASHBOARD_UI", "v2"),
+        patch.object(health, "_DASHBOARD_METRICS_V2", missing),
+    ):
+        assert health._dashboard_metrics_path() == health._DASHBOARD_METRICS_V1
+
+
+def test_dashboard_metrics_path_v3_falls_back_to_v2(tmp_path: Path) -> None:
+    from tr_bot import health
+
+    v2 = tmp_path / "metrics.v2.html"
+    v2.write_text("<html>metrics v2</html>", encoding="utf-8")
+    missing_v3 = tmp_path / "metrics.v3.html"
+    with (
+        patch.object(config, "DASHBOARD_UI", "v3"),
+        patch.object(health, "_DASHBOARD_METRICS_V3", missing_v3),
+        patch.object(health, "_DASHBOARD_METRICS_V2", v2),
+    ):
+        assert health._dashboard_metrics_path() == v2
+
+
+def test_metrics_route_serves_v2_when_enabled(client: TestClient, tmp_path: Path) -> None:
+    from tr_bot import health
+
+    v2 = tmp_path / "metrics.v2.html"
+    v2.write_text("<html>metrics cockpit v2</html>", encoding="utf-8")
+    with (
+        patch.object(config, "DASHBOARD_UI", "v2"),
+        patch.object(health, "_DASHBOARD_METRICS_V2", v2),
+    ):
+        r = client.get("/dashboard/metrics.html", follow_redirects=False)
+    assert r.status_code == 200
+    assert "metrics cockpit v2" in r.text
+
+
+def test_metrics_v2_page_contract_ids() -> None:
+    """Static contract: metrics.v2.html wires required element ids + scripts."""
+    from tr_bot import health
+
+    path = health._DASHBOARD_METRICS_V2
+    assert path.is_file()
+    text = path.read_text(encoding="utf-8")
+    for needle in (
+        'id="chart-nav"',
+        'id="chart-dd"',
+        'id="chart-trades"',
+        'id="perf-tbody"',
+        'id="bt-compare-open"',
+        'id="compare-modal"',
+        "/dashboard/js/common.js",
+        "/dashboard/js/metrics-core.js",
+        "/dashboard/js/metrics.js",
+    ):
+        assert needle in text
+
+
+def test_metrics_v3_page_contract_ids() -> None:
+    """Static contract: metrics.v3.html keeps the v2 cockpit ids + scripts."""
+    from tr_bot import health
+
+    path = health._DASHBOARD_METRICS_V3
+    assert path.is_file()
+    text = path.read_text(encoding="utf-8")
+    for needle in (
+        'id="chart-nav"',
+        'id="chart-dd"',
+        'id="chart-trades"',
+        'id="perf-tbody"',
+        'id="bt-compare-open"',
+        'id="compare-modal"',
+        "dash-panel",
+        "/dashboard/js/common.js",
+        "/dashboard/js/metrics-core.js",
+        "/dashboard/js/metrics.js",
+    ):
+        assert needle in text
+
+
+def test_index_v3_page_contract_ids() -> None:
+    """Static contract: Overview v3 KPI strip + chart + shared scripts."""
+    from tr_bot import health
+
+    path = health._DASHBOARD_INDEX_V3
+    assert path.is_file()
+    text = path.read_text(encoding="utf-8")
+    for needle in (
+        'id="ops-section"',
+        "kpi-strip",
+        'id="val-nav"',
+        'id="val-dd"',
+        'id="chart-equity"',
+        'id="qa-circuit-reset"',
+        "qa-danger-cluster",
+        "/dashboard/js/common.js",
+        "/dashboard/js/overview-core.js",
+    ):
+        assert needle in text
+
+
 def test_dashboard_summary_shape(client: TestClient) -> None:
     with patch.object(config, "DASHBOARD_TOKEN", ""):
         r = client.get("/api/dashboard/summary")
@@ -56,6 +271,9 @@ def test_dashboard_summary_shape(client: TestClient) -> None:
     assert isinstance(body["equity_history"].get("points"), list)
     assert "equity_history_display" in body
     assert isinstance(body["equity_history_display"].get("points"), list)
+    assert "metrics" in body
+    assert "drawdown_history" in body["metrics"]
+    assert isinstance(body["metrics"]["drawdown_history"].get("points"), list)
     assert "trading" in body
     assert "by_symbol" in body["trading"]
     assert isinstance(body["trading"]["by_symbol"], dict)
@@ -63,6 +281,7 @@ def test_dashboard_summary_shape(client: TestClient) -> None:
     assert "backtest" in body
     assert "pnl" in body
     assert "trade_summary" in body["pnl"]
+    assert "closed_trade_stats" in body["pnl"]
     assert "cost_assumptions" in body["pnl"]
     assert "last_run" in body["backtest"]
     assert "config" in body["backtest"]
@@ -71,6 +290,8 @@ def test_dashboard_summary_shape(client: TestClient) -> None:
     assert "strategy_promotion" in body
     assert "pointers" in body["strategy_promotion"]
     assert "startup_pipeline" in body
+    assert "alerts" in body
+    assert isinstance(body["alerts"], list)
     trn = body["training"]
     assert "config" in trn
     assert "dataset" in trn
@@ -84,6 +305,8 @@ def test_dashboard_summary_shape(client: TestClient) -> None:
     assert "paper_trading" in body["config"]
     assert "risk_per_trade" in body["config"]
     assert "public_base_url" in body["config"]
+    assert "dashboard_writes_enabled" in body["config"]
+    assert body["config"]["dashboard_ui"] in ("v1", "v2", "v3")
     dep = body["dependencies"]
     assert "readiness" in dep
     assert dep["readiness"].get("postgres_required_for_ready") is config.readiness_require_postgres()
@@ -143,6 +366,48 @@ def test_dashboard_ready_when_postgres_not_required(
     body = r.json()
     assert body["status"] == "ready"
     assert body["dependencies"]["readiness"]["postgres_required_for_ready"] is False
+
+
+def test_dashboard_summary_sections_subset(client: TestClient) -> None:
+    with patch.object(config, "DASHBOARD_TOKEN", ""):
+        r = client.get(
+            "/api/dashboard/summary",
+            params={"sections": "circuit,config,fund"},
+        )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["status"] in ("ready", "degraded")
+    assert "dependencies" in body
+    assert "circuit" in body
+    assert "config" in body
+    assert "fund" in body
+    assert "training" not in body
+    assert "backtest" not in body
+    assert "pnl" not in body
+
+
+def test_dashboard_summary_sections_unknown_400(client: TestClient) -> None:
+    with patch.object(config, "DASHBOARD_TOKEN", ""):
+        r = client.get(
+            "/api/dashboard/summary",
+            params={"sections": "circuit,not_a_real_section"},
+        )
+    assert r.status_code == 400
+    assert "not_a_real_section" in str(r.json().get("detail", ""))
+
+
+def test_dashboard_summary_alerts_without_strategy_promotion_key(client: TestClient) -> None:
+    """Overview requests alerts but not strategy_promotion; alerts must still build."""
+    with patch.object(config, "DASHBOARD_TOKEN", ""):
+        r = client.get(
+            "/api/dashboard/summary",
+            params={"sections": "alerts,ops,circuit,fund,pnl"},
+        )
+    assert r.status_code == 200
+    body = r.json()
+    assert "alerts" in body
+    assert isinstance(body["alerts"], list)
+    assert "strategy_promotion" not in body
 
 
 def test_enrich_backtest_last_run_flattens_ablation_matrix() -> None:
@@ -214,6 +479,74 @@ def test_enrich_backtest_last_run_reads_nested_metrics() -> None:
     assert out["total_return_pct"] == -3.0
     assert out["max_drawdown_pct"] == 5.5
     assert out["trades"] == 7
+
+
+def test_dashboard_trades_empty(client: TestClient, tmp_path: Path) -> None:
+    with patch.object(config, "ARTIFACTS_DIR", str(tmp_path)), patch.object(config, "DASHBOARD_TOKEN", ""):
+        r = client.get("/api/dashboard/trades")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["rows"] == []
+    assert body["total_matched"] == 0
+
+
+def test_dashboard_trades_filters_and_pagination(client: TestClient, tmp_path: Path) -> None:
+    from tr_bot.trade_ledger import append_closed_trade
+
+    with patch.object(config, "ARTIFACTS_DIR", str(tmp_path)):
+        append_closed_trade(
+            {
+                "utc": "2026-07-01T00:00:00+00:00",
+                "symbol": "BTC/USDT",
+                "position_side": "long",
+                "outcome": "win",
+                "net_pnl_usdt": 5.0,
+                "paper": True,
+            }
+        )
+        append_closed_trade(
+            {
+                "utc": "2026-07-02T00:00:00+00:00",
+                "symbol": "ETH/USDT",
+                "position_side": "short",
+                "outcome": "loss",
+                "net_pnl_usdt": -2.0,
+                "paper": True,
+            }
+        )
+    with patch.object(config, "ARTIFACTS_DIR", str(tmp_path)), patch.object(config, "DASHBOARD_TOKEN", ""):
+        r = client.get("/api/dashboard/trades", params={"symbol": "BTC/USDT"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["total_matched"] == 1
+    assert body["rows"][0]["symbol"] == "BTC/USDT"
+
+
+def test_dashboard_trades_csv_export(client: TestClient, tmp_path: Path) -> None:
+    from tr_bot.trade_ledger import append_closed_trade
+
+    with patch.object(config, "ARTIFACTS_DIR", str(tmp_path)):
+        append_closed_trade(
+            {
+                "utc": "2026-07-01T00:00:00+00:00",
+                "symbol": "BTC/USDT",
+                "position_side": "long",
+                "outcome": "win",
+                "net_pnl_usdt": 5.0,
+                "paper": True,
+            }
+        )
+    with patch.object(config, "ARTIFACTS_DIR", str(tmp_path)), patch.object(config, "DASHBOARD_TOKEN", ""):
+        r = client.get("/api/dashboard/trades", params={"format": "csv"})
+    assert r.status_code == 200
+    assert "text/csv" in (r.headers.get("content-type") or "")
+    assert "BTC/USDT" in r.text
+
+
+def test_dashboard_trades_401_when_token_required(client: TestClient) -> None:
+    with patch.object(config, "DASHBOARD_TOKEN", "secret-token"):
+        r = client.get("/api/dashboard/trades")
+    assert r.status_code == 401
 
 
 def test_dashboard_best_fit_winner_json_missing(client: TestClient, tmp_path: Path) -> None:

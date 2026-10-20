@@ -40,6 +40,7 @@ def _time_series_cv_report(
     n_splits: int,
     min_rows_per_fold: int,
     model_builder: Callable[[], RandomForestClassifier],
+    sample_weight: pd.Series | None = None,
 ) -> dict[str, Any]:
     n = len(X)
     if n < min_rows_per_fold:
@@ -60,12 +61,16 @@ def _time_series_cv_report(
 
     oof_pred = np.full(n, np.nan)
     oof_proba: np.ndarray | None = None
+    sw = sample_weight.reindex(X.index) if sample_weight is not None else None
 
     for fold_idx, (train_idx, val_idx) in enumerate(tscv.split(X)):
         if len(val_idx) == 0:
             continue
         clf = model_builder()
-        clf.fit(X.iloc[train_idx], y.iloc[train_idx])
+        fit_kw: dict[str, Any] = {}
+        if sw is not None:
+            fit_kw["sample_weight"] = sw.iloc[train_idx]
+        clf.fit(X.iloc[train_idx], y.iloc[train_idx], **fit_kw)
         y_tr = y.iloc[train_idx].values
         y_va = y.iloc[val_idx].values
         p_tr = clf.predict(X.iloc[train_idx])
@@ -152,7 +157,7 @@ def _validate_per_group(
     for keyval, sub in feat.groupby(key):
         sub = sub.sort_values("timestamp", kind="mergesort").reset_index(drop=True)
         try:
-            X, y = build_regime_xy(sub)
+            X, y, sw = build_regime_xy(sub)
         except ValueError:
             continue
         if len(X) < min_rows_per_fold:
@@ -163,6 +168,7 @@ def _validate_per_group(
             n_splits=n_splits,
             min_rows_per_fold=min_rows_per_fold,
             model_builder=model_builder,
+            sample_weight=sw,
         )
         rep["group"] = keyval if isinstance(keyval, tuple) else (keyval,)
         group_reports.append(rep)
@@ -212,13 +218,14 @@ def validate_regime_frame(
             min_rows_per_fold=min_rows_per_fold,
             model_builder=model_builder,
         )
-    X, y = build_regime_xy(feat)
+    X, y, sw = build_regime_xy(feat)
     return _time_series_cv_report(
         X,
         y,
         n_splits=n_splits,
         min_rows_per_fold=min_rows_per_fold,
         model_builder=model_builder,
+        sample_weight=sw,
     )
 
 

@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>tr_bot dashboard</title>
-  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="/dashboard/vendor/tailwindcdn.js"></script>
   <script>
     tailwind.config = {
       theme: {
@@ -13,18 +13,14 @@
             surface: { DEFAULT: '#0f1419', card: '#1a2332', border: '#2d3a4d' },
             accent: { DEFAULT: '#38bdf8', muted: '#64748b' }
           },
-          fontFamily: { sans: ['IBM Plex Sans', 'system-ui', 'sans-serif'] }
+          fontFamily: { sans: ['system-ui', 'sans-serif'] }
         }
       }
     };
   </script>
-  <link rel="preconnect" href="https://fonts.googleapis.com" />
-  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet" />
-  <!-- Fallback if Tailwind CDN is slow or blocked (still readable) -->
-  <style>
-    html, body { min-height: 100%; margin: 0; }
-    body { background-color: #0f1419; color: #e2e8f0; font-family: system-ui, sans-serif; }
-  </style>
+  <link rel="stylesheet" href="/dashboard/dashboard.css" />
+<script src="/dashboard/vendor/chart.umd.min.js"></script>
+  <script src="/dashboard/js/common.js"></script>
 </head>
 <body class="bg-surface min-h-screen text-slate-100 font-sans antialiased">
   <div id="auth-gate" class="hidden fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4">
@@ -36,28 +32,60 @@
     </div>
   </div>
 
-  <header class="border-b border-surface-border bg-surface-card/80 backdrop-blur">
-    <div class="max-w-6xl mx-auto px-4 py-6 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
-      <div>
-        <h1 class="text-2xl font-bold tracking-tight text-white">tr_bot</h1>
-        <p class="text-sm text-slate-400 mt-1">Trading dashboard</p>
-      </div>
-      <div class="flex flex-wrap items-center gap-2">
-        <a href="/dashboard/metrics.html" class="px-3 py-1 rounded-full text-xs font-medium bg-slate-700 hover:bg-slate-600 text-slate-100">Metrics</a>
-        <span id="pill-status" class="px-3 py-1 rounded-full text-xs font-medium bg-slate-700">…</span>
-        <span id="pill-redis" class="px-3 py-1 rounded-full text-xs font-medium bg-slate-700">Redis</span>
-        <span id="pill-pg" class="px-3 py-1 rounded-full text-xs font-medium bg-slate-700">Postgres</span>
-        <span id="pill-mode" class="px-3 py-1 rounded-full text-xs font-medium bg-slate-700">…</span>
-      </div>
-    </div>
-  </header>
+  <div id="dashboard-header"></div>
 
   <div id="exposure-banner" class="border-b border-surface-border bg-slate-900/90 text-sm text-slate-300 px-4 py-2 text-center">
     <span id="exposure-text" class="text-slate-400">Loading…</span>
   </div>
 
+  <div id="alert-bar" class="hidden sticky top-0 z-40 border-b border-surface-border px-4 py-2 space-y-1"></div>
+
+  <div id="compare-modal" class="hidden fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4">
+    <div class="bg-surface-card border border-surface-border rounded-xl p-6 max-w-2xl w-full shadow-xl max-h-[85vh] overflow-y-auto">
+      <div class="flex items-start justify-between gap-4 mb-3">
+        <h2 class="text-lg font-semibold text-white">Legacy vs SMC compare</h2>
+        <button type="button" id="compare-modal-close" class="text-slate-400 hover:text-white text-xl leading-none">&times;</button>
+      </div>
+      <p id="compare-summary" class="text-sm text-slate-300 mb-3">—</p>
+      <p id="compare-go-no-go" class="text-sm mb-3">—</p>
+      <h3 class="text-xs font-medium uppercase tracking-wide text-slate-500 mb-1">Raw artifacts</h3>
+      <pre id="compare-json" class="text-xs text-slate-400 bg-surface/80 border border-surface-border rounded-lg p-3 overflow-x-auto whitespace-pre-wrap break-all">—</pre>
+    </div>
+  </div>
+
   <main class="max-w-6xl mx-auto px-4 py-8 space-y-8">
     <p id="error-banner" class="hidden rounded-lg border border-red-500/50 bg-red-950/40 px-4 py-3 text-sm text-red-200"></p>
+
+    <section id="quick-actions" class="hidden rounded-xl border border-surface-border bg-surface-card p-5 shadow-lg">
+      <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-3">
+        <div>
+          <h2 class="text-lg font-semibold text-white">Quick actions</h2>
+          <p class="text-xs text-slate-500 mt-1">Write actions are gated by <code class="text-slate-400">DASHBOARD_WRITES_ENABLED</code> and, if set, a write token.</p>
+        </div>
+        <p id="qa-job-status" class="text-xs text-slate-400 font-mono text-right">—</p>
+      </div>
+      <div class="flex flex-wrap gap-2">
+        <button type="button" id="qa-circuit-reset" class="qa-btn rounded-lg bg-slate-700 hover:bg-slate-600 disabled:opacity-50 disabled:cursor-not-allowed px-3 py-2 text-sm font-medium">Reset circuit breaker</button>
+        <button type="button" id="qa-trading-toggle" class="qa-btn rounded-lg bg-slate-700 hover:bg-slate-600 disabled:opacity-50 disabled:cursor-not-allowed px-3 py-2 text-sm font-medium">Pause trading</button>
+        <button type="button" id="qa-backtest-run" class="qa-btn rounded-lg bg-slate-700 hover:bg-slate-600 disabled:opacity-50 disabled:cursor-not-allowed px-3 py-2 text-sm font-medium">Force backtest</button>
+        <button type="button" id="qa-training-run" class="qa-btn rounded-lg bg-slate-700 hover:bg-slate-600 disabled:opacity-50 disabled:cursor-not-allowed px-3 py-2 text-sm font-medium">Force train</button>
+        <button type="button" id="qa-compare-run" class="qa-btn rounded-lg bg-slate-700 hover:bg-slate-600 disabled:opacity-50 disabled:cursor-not-allowed px-3 py-2 text-sm font-medium">Run legacy/SMC compare</button>
+      </div>
+      <p id="qa-error" class="hidden text-xs text-rose-300 mt-3"></p>
+    </section>
+
+    <section class="rounded-xl border border-surface-border bg-surface-card p-5 shadow-lg" aria-labelledby="se-heading">
+      <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+        <div>
+          <h3 id="se-heading" class="text-xs font-medium uppercase tracking-wide text-slate-500">Strategy engine</h3>
+          <p id="se-summary" class="mt-2 text-sm text-slate-300">—</p>
+        </div>
+        <div class="flex items-center gap-2 self-start">
+          <span id="se-shadow-pill" class="hidden px-3 py-1 rounded-full text-xs font-medium bg-slate-700 text-slate-300"></span>
+          <button type="button" id="se-compare-open" class="rounded-lg bg-slate-700 hover:bg-slate-600 px-3 py-1.5 text-xs font-medium">View compare</button>
+        </div>
+      </div>
+    </section>
 
     <section class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4" id="ops-section">
       <article class="rounded-xl border border-surface-border bg-surface-card p-5 shadow-lg">
@@ -115,21 +143,13 @@
     <section class="rounded-xl border border-surface-border bg-surface-card p-6 shadow-lg">
       <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 mb-4">
         <h2 class="text-lg font-semibold text-white">Equity / NAV</h2>
-        <p class="text-xs text-slate-500">Recent samples from the trading loop</p>
+        <p class="text-xs text-slate-500">Recent samples from the trading loop (outlier-filtered, same series as Metrics)</p>
       </div>
-      <div class="relative w-full h-32">
-        <svg id="equity-sparkline" class="w-full h-full" viewBox="0 0 400 120" preserveAspectRatio="none" aria-label="Equity history">
-          <defs>
-            <linearGradient id="eqgrad" x1="0" y1="0" x2="0" y2="1">
-              <stop offset="0%" stop-color="#38bdf8" stop-opacity="0.35"/>
-              <stop offset="100%" stop-color="#38bdf8" stop-opacity="0"/>
-            </linearGradient>
-          </defs>
-          <polyline id="eq-line" fill="none" stroke="#38bdf8" stroke-width="1.5" points=""/>
-          <polygon id="eq-area" fill="url(#eqgrad)" points=""/>
-        </svg>
-        <p id="eq-spark-empty" class="absolute inset-0 flex items-center justify-center text-slate-500 text-sm hidden px-4 text-center">No equity samples yet — run the trading bot with the same <code class="text-slate-400">ARTIFACTS_DIR</code> as this API (e.g. <code class="text-slate-400">python -m tr_bot</code> or <code class="text-slate-400">./start.sh</code>). Each loop appends NAV to <code class="text-slate-400">equity_history.json</code>.</p>
+      <div class="relative w-full h-40">
+        <canvas id="chart-equity" class="w-full h-full"></canvas>
+        <p id="eq-spark-empty" class="absolute inset-0 flex items-center justify-center text-slate-500 text-sm hidden px-4 text-center bg-surface-card">No equity samples yet — run the trading bot with the same <code class="text-slate-400">ARTIFACTS_DIR</code> as this API (e.g. <code class="text-slate-400">python -m tr_bot</code> or <code class="text-slate-400">./start.sh</code>). Each loop appends NAV to <code class="text-slate-400">equity_history.json</code>.</p>
       </div>
+      <p id="eq-outliers-note" class="hidden text-xs text-amber-200/90 mt-2 leading-relaxed" role="status"></p>
     </section>
 
     <section class="rounded-xl border border-surface-border bg-surface-card p-6 shadow-lg" aria-labelledby="perf-heading">
@@ -199,8 +219,46 @@
           <tbody id="pnl-rollups-body"></tbody>
         </table>
       </div>
-      <h3 class="text-sm font-medium text-slate-400 mb-1">Closed trades</h3>
-      <p class="text-xs text-slate-500 mb-2">Exit = take-profit vs stop (first touch); net P&amp;L is after fees.</p>
+      <div class="flex flex-col sm:flex-row sm:items-end sm:justify-between gap-3 mb-2">
+        <div>
+          <h3 class="text-sm font-medium text-slate-400">Closed trades</h3>
+          <p class="text-xs text-slate-500">Exit = take-profit vs stop (first touch); net P&amp;L is after fees.</p>
+        </div>
+        <button type="button" id="trades-export-csv" class="text-xs text-accent hover:underline self-start sm:self-end">Export CSV</button>
+      </div>
+      <div class="flex flex-wrap items-end gap-2 mb-3 text-xs">
+        <div>
+          <label for="trades-f-symbol" class="block text-slate-500 mb-1">Symbol</label>
+          <input id="trades-f-symbol" type="text" placeholder="BTC/USDT" class="w-32 rounded-lg bg-surface border border-surface-border px-2 py-1.5 text-slate-200 focus:outline-none focus:ring-2 focus:ring-accent" />
+        </div>
+        <div>
+          <label for="trades-f-side" class="block text-slate-500 mb-1">Side</label>
+          <select id="trades-f-side" class="rounded-lg bg-surface border border-surface-border px-2 py-1.5 text-slate-200 focus:outline-none focus:ring-2 focus:ring-accent">
+            <option value="">Any</option>
+            <option value="long">Long</option>
+            <option value="short">Short</option>
+          </select>
+        </div>
+        <div>
+          <label for="trades-f-outcome" class="block text-slate-500 mb-1">Outcome</label>
+          <select id="trades-f-outcome" class="rounded-lg bg-surface border border-surface-border px-2 py-1.5 text-slate-200 focus:outline-none focus:ring-2 focus:ring-accent">
+            <option value="">Any</option>
+            <option value="win">Win (TP)</option>
+            <option value="loss">Loss (stop)</option>
+          </select>
+        </div>
+        <div>
+          <label for="trades-f-from" class="block text-slate-500 mb-1">From (UTC)</label>
+          <input id="trades-f-from" type="date" class="rounded-lg bg-surface border border-surface-border px-2 py-1.5 text-slate-200 focus:outline-none focus:ring-2 focus:ring-accent" />
+        </div>
+        <div>
+          <label for="trades-f-to" class="block text-slate-500 mb-1">To (UTC)</label>
+          <input id="trades-f-to" type="date" class="rounded-lg bg-surface border border-surface-border px-2 py-1.5 text-slate-200 focus:outline-none focus:ring-2 focus:ring-accent" />
+        </div>
+        <button type="button" id="trades-f-apply" class="rounded-lg bg-sky-600 hover:bg-sky-500 px-3 py-1.5 font-medium">Apply filters</button>
+        <button type="button" id="trades-f-clear" class="rounded-lg bg-slate-700 hover:bg-slate-600 px-3 py-1.5 font-medium">Clear</button>
+      </div>
+      <p id="trades-summary" class="text-xs text-slate-500 mb-2">—</p>
       <div class="overflow-x-auto">
         <table class="w-full text-sm">
           <thead>
@@ -216,6 +274,11 @@
           </thead>
           <tbody id="pnl-trades-body"></tbody>
         </table>
+      </div>
+      <div class="flex items-center justify-between gap-3 mt-3 text-xs">
+        <button type="button" id="trades-prev" class="rounded-lg bg-slate-700 hover:bg-slate-600 disabled:opacity-40 disabled:cursor-not-allowed px-3 py-1.5 font-medium">&larr; Prev</button>
+        <span id="trades-page-info" class="text-slate-500">—</span>
+        <button type="button" id="trades-next" class="rounded-lg bg-slate-700 hover:bg-slate-600 disabled:opacity-40 disabled:cursor-not-allowed px-3 py-1.5 font-medium">Next &rarr;</button>
       </div>
     </section>
 
@@ -409,11 +472,14 @@
   </main>
 
   <script>
-    const $ = (id) => document.getElementById(id);
+    const $ = TRDashboard.$;
 
     function pill(el, ok, label) {
+      if (!el) return;
       el.textContent = label;
-      el.className = 'px-3 py-1 rounded-full text-xs font-medium ' + (ok ? 'bg-emerald-900/60 text-emerald-300' : 'bg-rose-900/60 text-rose-300');
+      el.className =
+        'dash-pill ' +
+        (ok ? 'bg-emerald-900/60 text-emerald-300' : 'bg-rose-900/60 text-rose-300');
     }
 
     function fmtPct(x) {
@@ -745,52 +811,80 @@
       });
     }
 
-    function fmtUtc(iso) {
-      if (!iso) return '—';
-      try {
-        const d = new Date(iso.includes('T') && !iso.endsWith('Z') && !iso.includes('+') ? iso + 'Z' : iso);
-        if (Number.isNaN(d.getTime())) return String(iso);
-        return d.toISOString().replace('T', ' ').replace(/\.\d{3}Z$/, ' UTC');
-      } catch (e) {
-        return String(iso);
-      }
+    const fmtUtc = TRDashboard.fmtUtc;
+
+    let equityChart = null;
+    function equityChartInstance() {
+      if (equityChart || typeof Chart === 'undefined') return equityChart;
+      const el = $('chart-equity');
+      if (!el) return null;
+      equityChart = new Chart(el.getContext('2d'), {
+        type: 'line',
+        data: {
+          datasets: [
+            {
+              label: 'NAV',
+              data: [],
+              borderColor: '#38bdf8',
+              backgroundColor: 'rgba(56, 189, 248, 0.15)',
+              tension: 0.15,
+              fill: true,
+            },
+          ],
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          animation: false,
+          parsing: false,
+          normalized: true,
+          scales: {
+            x: {
+              type: 'linear',
+              ticks: { color: '#94a3b8', callback: (v) => fmtUtc(Number(v)).slice(11, 16) },
+              grid: { color: 'rgba(148, 163, 184, 0.12)' },
+            },
+            y: {
+              ticks: { color: '#94a3b8' },
+              grid: { color: 'rgba(148, 163, 184, 0.12)' },
+            },
+          },
+          plugins: {
+            legend: { display: false },
+            tooltip: {
+              mode: 'index',
+              intersect: false,
+              callbacks: {
+                title: (items) => (items && items.length ? fmtUtc(Number(items[0].parsed.x)) : ''),
+                label: (item) => 'NAV ' + Number(item.parsed.y).toLocaleString(undefined, { maximumFractionDigits: 2 }),
+              },
+            },
+          },
+          interaction: { mode: 'index', intersect: false },
+          elements: { point: { radius: 0, hoverRadius: 4 } },
+        },
+      });
+      return equityChart;
     }
 
     function renderSparkline(points) {
-      const line = $('eq-line');
-      const area = $('eq-area');
       const empty = $('eq-spark-empty');
-      if (!line || !area || !empty) return;
-      if (!points || !points.length) {
+      const canvas = $('chart-equity');
+      if (!empty || !canvas) return;
+      const rows = (points || [])
+        .map((p) => ({ x: parseIsoMs(p.t), y: Number(p.nav) }))
+        .filter((r) => Number.isFinite(r.x) && Number.isFinite(r.y));
+      if (!rows.length) {
         empty.classList.remove('hidden');
-        line.setAttribute('points', '');
-        area.setAttribute('points', '');
+        canvas.classList.add('invisible');
         return;
       }
       empty.classList.add('hidden');
-      const W = 400;
-      const H = 120;
-      const pad = 8;
-      const vals = points.map((p) => Number(p.nav));
-      let min = Math.min(...vals);
-      let max = Math.max(...vals);
-      if (!Number.isFinite(min) || !Number.isFinite(max)) return;
-      if (max === min) {
-        min -= 1;
-        max += 1;
-      }
-      const n = vals.length;
-      const coords = vals.map((v, i) => {
-        const x = pad + (i / Math.max(1, n - 1)) * (W - 2 * pad);
-        const y = H - pad - ((v - min) / (max - min)) * (H - 2 * pad);
-        return [x, y];
-      });
-      const pts = coords.map((c) => c[0] + ',' + c[1]).join(' ');
-      line.setAttribute('points', pts);
-      const firstX = coords[0][0];
-      const lastX = coords[coords.length - 1][0];
-      const baseY = H - pad;
-      area.setAttribute('points', pts + ' ' + lastX + ',' + baseY + ' ' + firstX + ',' + baseY);
+      canvas.classList.remove('invisible');
+      const chart = equityChartInstance();
+      if (!chart) return;
+      chart.data.datasets[0].data = rows;
+      chart.update();
     }
 
     function parseIsoMs(iso) {
@@ -856,7 +950,7 @@
       const pl = $('perf-period-line');
       const ps = $('perf-period-span');
       const nl = $('perf-naive-line');
-      const eh = data.equity_history || {};
+      const eh = data.equity_history_display || data.equity_history || {};
       const points = Array.isArray(eh.points) ? eh.points : [];
       const pnlPayload = data.pnl || {};
       const eqw = pnlPayload.equity_window || {};
@@ -1104,44 +1198,153 @@
         }
       }
 
-      const tb = $('pnl-trades-body');
-      if (tb) {
-        tb.innerHTML = '';
-        const trades = Array.isArray(pnl.recent_trades) ? pnl.recent_trades : [];
-        if (!trades.length) {
-          const tr = document.createElement('tr');
-          tr.innerHTML =
-            '<td colspan="7" class="py-4 text-slate-500">No closed trades in <code class="text-slate-400">trade_ledger.jsonl</code> yet — exits append when the bot closes a position.</td>';
-          tb.appendChild(tr);
-        } else {
-          trades.forEach(function (t) {
-            const tr = document.createElement('tr');
-            tr.className = 'border-b border-surface-border/50';
-            const net = t.net_pnl_usdt != null ? Number(t.net_pnl_usdt) : NaN;
-            const fee = t.fee_usdt != null ? Number(t.fee_usdt).toFixed(4) : '—';
-            const nt = netClass(net);
-            tr.innerHTML =
-              '<td class="py-2 pr-3 font-mono text-xs">' +
-              (t.utc ? fmtUtc(t.utc) : '—') +
-              '</td><td class="py-2 pr-3 font-mono">' +
-              (t.symbol || '—') +
-              '</td><td class="py-2 pr-3">' +
-              (t.position_side || '—') +
-              '</td><td class="py-2 pr-3">' +
-              (t.outcome || '—') +
-              '</td><td class="py-2 pr-3 tabular-nums ' +
-              nt +
-              '">' +
-              (Number.isFinite(net) ? fmtSignedPnl(net, 'USDT') : '—') +
-              '</td><td class="py-2 pr-3 tabular-nums">' +
-              fee +
-              '</td><td class="py-2">' +
-              (t.paper === true ? 'yes' : t.paper === false ? 'no' : '—') +
-              '</td>';
-            tb.appendChild(tr);
-          });
-        }
+      // Closed-trades table is owned by the trades widget (loadTrades/renderTradesRows
+      // below), which reads the filtered/paginated /api/dashboard/trades endpoint
+      // instead of the unfiltered pnl.recent_trades snapshot.
+    }
+
+    function renderTradeRows(tbodyEl, trades) {
+      tbodyEl.innerHTML = '';
+      if (!trades.length) {
+        const tr = document.createElement('tr');
+        tr.innerHTML =
+          '<td colspan="7" class="py-4 text-slate-500">No closed trades match these filters yet.</td>';
+        tbodyEl.appendChild(tr);
+        return;
       }
+      trades.forEach(function (t) {
+        const tr = document.createElement('tr');
+        tr.className = 'border-b border-surface-border/50';
+        const net = t.net_pnl_usdt != null ? Number(t.net_pnl_usdt) : NaN;
+        const fee = t.fee_usdt != null ? Number(t.fee_usdt).toFixed(4) : '—';
+        const nt = netClass(net);
+        tr.innerHTML =
+          '<td class="py-2 pr-3 font-mono text-xs">' +
+          TRDashboard.escapeHtml(t.utc ? fmtUtc(t.utc) : '—') +
+          '</td><td class="py-2 pr-3 font-mono">' +
+          TRDashboard.escapeHtml(t.symbol || '—') +
+          '</td><td class="py-2 pr-3">' +
+          TRDashboard.escapeHtml(t.position_side || '—') +
+          '</td><td class="py-2 pr-3">' +
+          TRDashboard.escapeHtml(t.outcome || '—') +
+          '</td><td class="py-2 pr-3 tabular-nums ' +
+          nt +
+          '">' +
+          (Number.isFinite(net) ? fmtSignedPnl(net, 'USDT') : '—') +
+          '</td><td class="py-2 pr-3 tabular-nums">' +
+          fee +
+          '</td><td class="py-2">' +
+          (t.paper === true ? 'yes' : t.paper === false ? 'no' : '—') +
+          '</td>';
+        tbodyEl.appendChild(tr);
+      });
+    }
+
+    const tradesState = { symbol: '', side: '', outcome: '', from: '', to: '', offset: 0, limit: 20 };
+
+    function tradesQueryParams(extra) {
+      const p = new URLSearchParams();
+      if (tradesState.symbol) p.set('symbol', tradesState.symbol);
+      if (tradesState.side) p.set('side', tradesState.side);
+      if (tradesState.outcome) p.set('outcome', tradesState.outcome);
+      if (tradesState.from) p.set('from', tradesState.from + 'T00:00:00+00:00');
+      if (tradesState.to) p.set('to', tradesState.to + 'T23:59:59+00:00');
+      p.set('offset', String(tradesState.offset));
+      p.set('limit', String(tradesState.limit));
+      if (extra) for (const k in extra) p.set(k, extra[k]);
+      return p;
+    }
+
+    async function loadTrades() {
+      const tb = $('pnl-trades-body');
+      if (!tb) return;
+      try {
+        const params = tradesQueryParams();
+        const data = await TRDashboard.fetchDashboardJson('/api/dashboard/trades?' + params.toString());
+        if (data === null) return;
+        renderTradeRows(tb, data.rows || []);
+        const info = $('trades-page-info');
+        if (info) {
+          const start = data.total_matched ? data.offset + 1 : 0;
+          const end = data.offset + (data.rows || []).length;
+          info.textContent = data.total_matched
+            ? 'Showing ' + start + '–' + end + ' of ' + data.total_matched
+            : 'No matching trades';
+        }
+        const prevBtn = $('trades-prev');
+        const nextBtn = $('trades-next');
+        if (prevBtn) prevBtn.disabled = tradesState.offset <= 0;
+        if (nextBtn) nextBtn.disabled = !data.has_more;
+        const summary = $('trades-summary');
+        if (summary) {
+          summary.textContent = data.truncated
+            ? 'Scanned the ' + data.scanned + ' most recent ledger lines (older trades not scanned for this filter).'
+            : '';
+        }
+      } catch (e) {
+        const summary = $('trades-summary');
+        if (summary) summary.textContent = 'Failed to load trades: ' + ((e && e.message) || String(e));
+      }
+    }
+
+    function wireTradesWidget() {
+      const apply = $('trades-f-apply');
+      if (apply) {
+        apply.addEventListener('click', () => {
+          tradesState.symbol = ($('trades-f-symbol') || {}).value || '';
+          tradesState.side = ($('trades-f-side') || {}).value || '';
+          tradesState.outcome = ($('trades-f-outcome') || {}).value || '';
+          tradesState.from = ($('trades-f-from') || {}).value || '';
+          tradesState.to = ($('trades-f-to') || {}).value || '';
+          tradesState.offset = 0;
+          loadTrades();
+        });
+      }
+      const clear = $('trades-f-clear');
+      if (clear) {
+        clear.addEventListener('click', () => {
+          ['trades-f-symbol', 'trades-f-side', 'trades-f-outcome', 'trades-f-from', 'trades-f-to'].forEach((id) => {
+            const el = $(id);
+            if (el) el.value = '';
+          });
+          tradesState.symbol = tradesState.side = tradesState.outcome = tradesState.from = tradesState.to = '';
+          tradesState.offset = 0;
+          loadTrades();
+        });
+      }
+      const prev = $('trades-prev');
+      if (prev) {
+        prev.addEventListener('click', () => {
+          tradesState.offset = Math.max(0, tradesState.offset - tradesState.limit);
+          loadTrades();
+        });
+      }
+      const next = $('trades-next');
+      if (next) {
+        next.addEventListener('click', () => {
+          tradesState.offset += tradesState.limit;
+          loadTrades();
+        });
+      }
+      const exportBtn = $('trades-export-csv');
+      if (exportBtn) {
+        exportBtn.addEventListener('click', async () => {
+          const summary = $('trades-summary');
+          exportBtn.disabled = true;
+          try {
+            const params = tradesQueryParams({ format: 'csv', limit: '1000', offset: '0' });
+            await TRDashboard.downloadDashboardFile(
+              '/api/dashboard/trades?' + params.toString(),
+              'trades.csv'
+            );
+          } catch (e) {
+            if (summary) summary.textContent = 'CSV export failed: ' + ((e && e.message) || String(e));
+          } finally {
+            exportBtn.disabled = false;
+          }
+        });
+      }
+      loadTrades();
     }
 
     function renderBestFit(bestFit, cfg) {
@@ -1241,8 +1444,197 @@
       if (t) t.textContent = 'UTC: ' + (sp.utc || '—');
     }
 
+    let lastStrategyEngineStatus = null;
+    let lastFundHalted = null;
+
+    function renderStrategyEngine(ses) {
+      ses = ses || {};
+      lastStrategyEngineStatus = ses;
+      const sum = $('se-summary');
+      const pill = $('se-shadow-pill');
+      if (sum) {
+        const engine = ses.strategy_engine || 'legacy';
+        const minScore = ses.smc_min_trade_score != null ? ses.smc_min_trade_score : '—';
+        const exitMode = ses.exit_mode || '—';
+        sum.textContent = 'Engine: ' + engine + ' · SMC min score ' + minScore + ' · exit mode ' + exitMode;
+      }
+      if (pill) {
+        const ag = ses.shadow_agreement;
+        if ((ses.strategy_engine || '').toLowerCase() === 'shadow' && ag && ag.pairs) {
+          pill.textContent = 'Shadow agreement ' + (ag.rate * 100).toFixed(1) + '% (' + ag.agree + '/' + ag.pairs + ')';
+          pill.className =
+            'px-3 py-1 rounded-full text-xs font-medium ' +
+            (ag.rate >= 0.8 ? 'bg-emerald-900/60 text-emerald-300' : 'bg-amber-900/60 text-amber-200');
+        } else {
+          pill.textContent = '';
+          pill.className = 'hidden px-3 py-1 rounded-full text-xs font-medium bg-slate-700 text-slate-300';
+        }
+      }
+    }
+
+    function renderCompareModal() {
+      TRDashboard.renderCompareModal(lastStrategyEngineStatus || {});
+    }
+
+    function openCompareModal() {
+      TRDashboard.openCompareModal(lastStrategyEngineStatus || {});
+    }
+
+    function closeCompareModal() {
+      TRDashboard.closeCompareModal();
+    }
+
+    function setQaError(msg) {
+      const el = $('qa-error');
+      if (!el) return;
+      if (msg) {
+        el.textContent = msg;
+        el.classList.remove('hidden');
+      } else {
+        el.textContent = '';
+        el.classList.add('hidden');
+      }
+    }
+
+    function setQaBusy(busy, statusText) {
+      document.querySelectorAll('.qa-btn').forEach((btn) => {
+        btn.disabled = !!busy;
+      });
+      const status = $('qa-job-status');
+      if (status) status.textContent = statusText || (busy ? 'Working…' : '—');
+    }
+
+    async function runJobAction(url, body, kind) {
+      setQaError('');
+      setQaBusy(true, 'Starting ' + kind + '…');
+      try {
+        const job = await TRDashboard.postAction(url, body);
+        const final = await TRDashboard.pollJob(job.id, {
+          onUpdate: (j) => setQaBusy(true, kind + ': ' + j.status + '…'),
+        });
+        if (final.status === 'error') {
+          setQaError(kind + ' failed: ' + (final.error || 'unknown error'));
+          setQaBusy(false, kind + ': failed');
+        } else {
+          setQaBusy(false, kind + ': done');
+        }
+        return final;
+      } catch (e) {
+        setQaError((e && e.message) || String(e));
+        setQaBusy(false, kind + ': error');
+        throw e;
+      }
+    }
+
+    function wireQuickActions() {
+      const resetBtn = $('qa-circuit-reset');
+      if (resetBtn) {
+        resetBtn.addEventListener('click', async () => {
+          setQaError('');
+          setQaBusy(true, 'Resetting circuit breaker…');
+          try {
+            await TRDashboard.postAction('/api/dashboard/actions/circuit-reset');
+            setQaBusy(false, 'Circuit reset requested — refreshes on next poll.');
+          } catch (e) {
+            setQaError((e && e.message) || String(e));
+            setQaBusy(false, 'Circuit reset: error');
+          }
+        });
+      }
+
+      const toggleBtn = $('qa-trading-toggle');
+      if (toggleBtn) {
+        toggleBtn.addEventListener('click', async () => {
+          const pausing = !lastFundHalted;
+          if (pausing && !window.confirm('Pause live trading? The bot will stop opening new positions until resumed.')) return;
+          if (!pausing && !window.confirm('Resume trading?')) return;
+          setQaError('');
+          setQaBusy(true, pausing ? 'Pausing…' : 'Resuming…');
+          try {
+            const url = pausing ? '/api/dashboard/actions/trading-pause' : '/api/dashboard/actions/trading-resume';
+            await TRDashboard.postAction(url, pausing ? { reason: 'manual pause via dashboard' } : {});
+            setQaBusy(false, pausing ? 'Paused' : 'Resumed');
+          } catch (e) {
+            setQaError((e && e.message) || String(e));
+            setQaBusy(false, 'error');
+          }
+        });
+      }
+
+      const btBtn = $('qa-backtest-run');
+      if (btBtn) {
+        btBtn.addEventListener('click', () => {
+          runJobAction('/api/dashboard/actions/backtest-run', {}, 'Backtest').catch(() => {});
+        });
+      }
+
+      const trainBtn = $('qa-training-run');
+      if (trainBtn) {
+        trainBtn.addEventListener('click', () => {
+          if (!window.confirm('Force a training run now?')) return;
+          runJobAction('/api/dashboard/actions/training-run', {}, 'Training').catch(() => {});
+        });
+      }
+
+      const cmpBtn = $('qa-compare-run');
+      if (cmpBtn) {
+        cmpBtn.addEventListener('click', () => {
+          runJobAction('/api/dashboard/actions/backtest-compare', {}, 'Compare')
+            .then(() => renderCompareModal())
+            .catch(() => {});
+        });
+      }
+
+      const openBtn = $('se-compare-open');
+      if (openBtn) openBtn.addEventListener('click', openCompareModal);
+      const closeBtn = $('compare-modal-close');
+      if (closeBtn) closeBtn.addEventListener('click', closeCompareModal);
+      const modal = $('compare-modal');
+      if (modal) {
+        modal.addEventListener('click', (ev) => {
+          if (ev.target === modal) closeCompareModal();
+        });
+      }
+    }
+
+    function renderAlertBar(alerts) {
+      const bar = $('alert-bar');
+      if (!bar) return;
+      alerts = Array.isArray(alerts) ? alerts : [];
+      if (!alerts.length) {
+        bar.classList.add('hidden');
+        bar.innerHTML = '';
+        return;
+      }
+      const styles = {
+        critical: 'bg-rose-950/70 border border-rose-500/40 text-rose-100',
+        warning: 'bg-amber-950/60 border border-amber-500/30 text-amber-100',
+        info: 'bg-slate-800/70 border border-surface-border text-slate-200',
+      };
+      bar.innerHTML = alerts
+        .map(function (a) {
+          const cls = styles[a.severity] || styles.info;
+          const msg = TRDashboard.escapeHtml(a.message || a.id || 'Alert');
+          const href = a.href ? TRDashboard.escapeHtml(a.href) : '';
+          const dot = a.severity === 'critical' ? '\u25cf' : '\u25b2';
+          const body = '<span class="mr-2">' + dot + '</span>' + msg;
+          return (
+            '<div class="text-sm font-medium rounded px-3 py-1.5 max-w-6xl mx-auto ' +
+            cls +
+            '">' +
+            (href
+              ? '<a href="' + href + '" class="hover:underline block">' + body + '</a>'
+              : '<span class="block">' + body + '</span>') +
+            '</div>'
+          );
+        })
+        .join('');
+      bar.classList.remove('hidden');
+    }
+
     function render(data) {
       $('error-banner').classList.add('hidden');
+      renderAlertBar(data.alerts);
       const dep = data.dependencies || {};
       const st = data.status;
       const pgDown = !!(dep.postgres && dep.postgres.ok === false);
@@ -1311,11 +1703,34 @@
         }
       }
 
-      const eh = data.equity_history || {};
-      renderSparkline(eh.points || []);
+      const ehd = data.equity_history_display || {};
+      renderSparkline(ehd.points || (data.equity_history || {}).points || []);
+      const eqNote = $('eq-outliers-note');
+      if (eqNote) {
+        if (ehd.outliers_dropped != null && ehd.outliers_dropped > 0) {
+          eqNote.textContent =
+            'Excluded ' + ehd.outliers_dropped + ' outlier NAV sample(s) from this chart (stale/corrupt equity_history.json entries).';
+          eqNote.classList.remove('hidden');
+        } else {
+          eqNote.textContent = '';
+          eqNote.classList.add('hidden');
+        }
+      }
       renderPerformance(data);
       renderBestFit(data.best_fit, data.config);
       renderPnl(data.pnl);
+      // Auto-refresh the trades widget on the main poll cycle, but only while on
+      // page 1 (offset 0) with no manual pagination in flight, so we don't yank
+      // the user off a page they're actively reviewing.
+      if (tradesState.offset === 0) loadTrades();
+
+      renderStrategyEngine(data.strategy_engine_status);
+
+      const qaSection = $('quick-actions');
+      if (qaSection) {
+        if (cfg.dashboard_writes_enabled) qaSection.classList.remove('hidden');
+        else qaSection.classList.add('hidden');
+      }
 
       renderTrading(data.trading);
       const trainStale = $('train-api-stale');
@@ -1340,6 +1755,9 @@
 
       const fund = data.fund || {};
       const fs = fund.state;
+      lastFundHalted = !!(fund.halt_file || (fs && fs.halted));
+      const toggleBtn = $('qa-trading-toggle');
+      if (toggleBtn) toggleBtn.textContent = lastFundHalted ? 'Resume trading' : 'Pause trading';
       if (fund.enabled && fs) {
         $('val-nav').textContent = Number(fs.last_nav).toLocaleString(undefined, { maximumFractionDigits: 2 }) + ' ' + (cfg.fund_quote_asset || 'USDT');
         $('val-nav-updated').textContent = fs.last_update_utc || '—';
@@ -1392,46 +1810,16 @@
     }
 
     async function loadSummary() {
-      const token = sessionStorage.getItem('dashboard_token');
-      const headers = {};
-      if (token) headers['Authorization'] = 'Bearer ' + token;
-      const r = await fetch('/api/dashboard/summary', { headers });
-      if (r.status === 401) {
-        $('auth-gate').classList.remove('hidden');
-        return;
-      }
-      $('auth-gate').classList.add('hidden');
-      if (!r.ok) {
-        $('error-banner').textContent = 'Failed to load: ' + r.status + ' ' + (await r.text());
-        $('error-banner').classList.remove('hidden');
-        return;
-      }
-      render(await r.json());
+      const data = await TRDashboard.fetchDashboardJson('/api/dashboard/summary');
+      if (data === null) return;
+      render(data);
     }
 
-    const btn = $('token-save');
-    if (btn) {
-      btn.addEventListener('click', () => {
-        const v = $('token-input').value.trim();
-        if (v) sessionStorage.setItem('dashboard_token', v);
-        $('auth-gate').classList.add('hidden');
-        loadSummary();
-      });
-    }
-
-    async function safeLoad() {
-      try {
-        await loadSummary();
-      } catch (e) {
-        const b = $('error-banner');
-        if (b) {
-          b.textContent = 'Dashboard load error: ' + (e && e.message ? e.message : String(e));
-          b.classList.remove('hidden');
-        }
-      }
-    }
-    safeLoad();
-    setInterval(safeLoad, 20000);
+    TRDashboard.mountHeader({ title: 'tr_bot', subtitle: 'Trading dashboard (v1)', showRedis: true, showMode: true });
+    TRDashboard.wireTokenGate(loadSummary);
+    wireQuickActions();
+    wireTradesWidget();
+    TRDashboard.startPolling(loadSummary, 20000);
   </script>
 </body>
 </html>

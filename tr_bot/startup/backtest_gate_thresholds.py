@@ -10,6 +10,6 @@ from __future__ import annotations
 DEFAULT_MIN_RETURN_PCT = -1.0
 # Max allowed drawdown (% points); typical paper range 10–20.
 DEFAULT_MAX_DRAWDOWN_PCT = 12.0
-# 0 = do not block startup when the walk-forward window has no fills (common with strict filters).
-# Require activity: set STARTUP_BACKTEST_MIN_TRADES=3 (or higher) in .env.
-DEFAULT_MIN_TRADES = 0
+# Smoke-test floor: reject zero-trade profiles at startup. Override via STARTUP_BACKTEST_MIN_TRADES.
+# Promotion uses separate PROMOTION_MIN_TRADES (typically higher).
+DEFAULT_MIN_TRADES = 3

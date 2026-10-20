@@ -13,13 +13,48 @@ from fastapi.responses import FileResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from tr_bot import config
+from tr_bot.dashboard_actions import router as dashboard_actions_router
 from tr_bot.dashboard_api import router as dashboard_router
 from tr_bot.health_checks import check_postgres, check_redis, overall_readiness_ok
 
 app = FastAPI(title="tr_bot health", version="0.1.0")
 
 _STATIC_DIR = Path(__file__).resolve().parent / "static" / "dashboard"
-_DASHBOARD_INDEX = _STATIC_DIR / "index.html"
+_DASHBOARD_INDEX_V1 = _STATIC_DIR / "index.html"
+_DASHBOARD_INDEX_V2 = _STATIC_DIR / "index.v2.html"
+_DASHBOARD_INDEX_V3 = _STATIC_DIR / "index.v3.html"
+_DASHBOARD_METRICS_V1 = _STATIC_DIR / "metrics.html"
+_DASHBOARD_METRICS_V2 = _STATIC_DIR / "metrics.v2.html"
+_DASHBOARD_METRICS_V3 = _STATIC_DIR / "metrics.v3.html"
+
+
+def _dashboard_index_path() -> Path:
+    """
+    Resolve which dashboard HTML to serve at `/` based on DASHBOARD_UI.
+
+    Fallback chain: requested version → older versions → v1
+    (e.g. v3 → v2 → v1) so a missing file rolls back safely.
+    """
+    ui = config.DASHBOARD_UI
+    if ui == "v3" and _DASHBOARD_INDEX_V3.is_file():
+        return _DASHBOARD_INDEX_V3
+    if ui in ("v2", "v3") and _DASHBOARD_INDEX_V2.is_file():
+        return _DASHBOARD_INDEX_V2
+    return _DASHBOARD_INDEX_V1
+
+
+def _dashboard_metrics_path() -> Path:
+    """
+    Resolve Metrics HTML based on DASHBOARD_UI.
+
+    Same fallback chain as Main: v3 → v2 → v1 when files are missing.
+    """
+    ui = config.DASHBOARD_UI
+    if ui == "v3" and _DASHBOARD_METRICS_V3.is_file():
+        return _DASHBOARD_METRICS_V3
+    if ui in ("v2", "v3") and _DASHBOARD_METRICS_V2.is_file():
+        return _DASHBOARD_METRICS_V2
+    return _DASHBOARD_METRICS_V1
 
 
 @app.get("/", response_model=None)
@@ -28,9 +63,19 @@ def root() -> FileResponse | RedirectResponse:
     Serve the dashboard HTML at / so browsers work without a redirect chain.
     (Use http://127.0.0.1:PORT or http://localhost:PORT — many browsers show a blank page for http://0.0.0.0:PORT.)
     """
-    if _DASHBOARD_INDEX.is_file():
-        return FileResponse(_DASHBOARD_INDEX, media_type="text/html")
+    index_path = _dashboard_index_path()
+    if index_path.is_file():
+        return FileResponse(index_path, media_type="text/html")
     return RedirectResponse(url="/dashboard/", status_code=302)
+
+
+@app.get("/dashboard/metrics.html", response_model=None)
+def dashboard_metrics() -> FileResponse | Response:
+    """Serve Metrics v1 or v2 based on DASHBOARD_UI (explicit route before StaticFiles)."""
+    path = _dashboard_metrics_path()
+    if path.is_file():
+        return FileResponse(path, media_type="text/html")
+    return Response(status_code=404, content=b"metrics page missing")
 
 
 @app.get("/favicon.ico", response_model=None)
@@ -46,6 +91,7 @@ def dashboard_edit_alias() -> RedirectResponse:
 
 
 app.include_router(dashboard_router)
+app.include_router(dashboard_actions_router)
 
 
 def _check_redis() -> dict[str, Any]:

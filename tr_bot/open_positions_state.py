@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
-from dataclasses import asdict
+from dataclasses import asdict, fields
 from pathlib import Path
 
 from tr_bot import config
@@ -15,6 +15,7 @@ from tr_bot.position import OpenPosition
 logger = logging.getLogger("tr_bot.open_positions_state")
 
 OPEN_POSITIONS_FILENAME = "open_positions.json"
+_POSITION_FIELD_NAMES = frozenset(f.name for f in fields(OpenPosition))
 
 
 def _path() -> Path:
@@ -37,7 +38,8 @@ def load_open_positions() -> dict[str, OpenPosition]:
             if not isinstance(payload, dict):
                 continue
             try:
-                out[symbol] = OpenPosition(**payload)
+                cleaned = {k: v for k, v in payload.items() if k in _POSITION_FIELD_NAMES}
+                out[symbol] = OpenPosition(**cleaned)
             except (TypeError, ValueError):
                 continue
         return out

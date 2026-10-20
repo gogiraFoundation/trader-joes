@@ -71,14 +71,23 @@ def test_call_ccxt_with_retries_succeeds_second_attempt(monkeypatch) -> None:
 def test_execute_trade_market_passes_new_client_order_id(monkeypatch) -> None:
     monkeypatch.setattr(cfg, "PAPER_TRADING", False)
     monkeypatch.setattr(cfg, "EXECUTION_STYLE", "market")
+    monkeypatch.setattr(cfg, "DEPLOYMENT_TIER", "live_full")
+    monkeypatch.setattr(cfg, "LIVE_MAX_NOTIONAL_USDT", 10_000.0)
+    monkeypatch.setattr(cfg, "LIVE_BALANCE_RESERVE_BPS", 0.0)
     captured: dict = {}
 
     class Ex:
         def load_markets(self) -> None:
             return None
 
+        def market(self, symbol: str) -> dict:
+            return {"limits": {"amount": {"min": 0.0}, "cost": {"min": 0.0}}}
+
         def amount_to_precision(self, sym: str, a: float) -> str:
             return str(a)
+
+        def fetch_ticker(self, symbol: str) -> dict:
+            return {"ask": 100.0, "last": 100.0, "close": 100.0}
 
         def create_order(self, symbol, typ, side, amount, price, params):
             captured.update(params or {})
@@ -89,6 +98,8 @@ def test_execute_trade_market_passes_new_client_order_id(monkeypatch) -> None:
         "tr_bot.binance_rest.call_ccxt_with_retries",
         lambda exchange, fn, context="", max_retries=None: fn(),
     )
+    monkeypatch.setattr("tr_bot.account.fetch_free_quote_amount", lambda _s: 10_000.0)
+    monkeypatch.setattr("tr_bot.quote_usdt.usdt_per_quote_unit", lambda _q: 1.0)
     out = execution.execute_trade("BTC/USDT", "buy", 0.001)
     assert captured.get("newClientOrderId", "").startswith("tb")
     assert len(str(captured.get("newClientOrderId", ""))) <= 36

@@ -42,7 +42,12 @@ def strategy_evaluate(
     root = _root()
     pid = (profile_id or "").strip() or (config.ACTIVE_STRATEGY_PROFILE_ID or None)
     t = (tier or config.DEPLOYMENT_TIER or "paper").strip()
-    report = gates.run_gates(root, profile_id=pid, tier=t)
+    profile_hash = None
+    if pid:
+        prof_doc = dep.read_json_file(dep.strategy_profile_path(root, pid))
+        if isinstance(prof_doc, dict):
+            profile_hash = prof_doc.get("config_hash")
+    report = gates.run_gates(root, profile_id=pid, tier=t, profile_hash=profile_hash)
     return {
         "profile_id": pid,
         "tier": t,
@@ -72,6 +77,9 @@ def strategy_promote(
     if not prof_path.is_file():
         return {"ok": False, "reason": "profile_file_missing", "path": str(prof_path)}
 
+    prof_doc = dep.read_json_file(prof_path)
+    profile_hash = prof_doc.get("config_hash") if isinstance(prof_doc, dict) else None
+
     if gates.promotions_frozen(root):
         out = {"ok": False, "reason": "promotions_frozen"}
         _append_log(root, out, pid, to_tier, passed=False)
@@ -83,7 +91,7 @@ def strategy_promote(
         )
         return out
 
-    report = gates.run_gates(root, profile_id=pid, tier=to_tier)
+    report = gates.run_gates(root, profile_id=pid, tier=to_tier, profile_hash=profile_hash)
     if not report.all_passed:
         out = {
             "ok": False,
@@ -100,6 +108,27 @@ def strategy_promote(
         )
         return out
 
+    comparator_result: dict[str, Any] | None = None
+    if bool(getattr(config, "PROMOTION_REQUIRE_COMPARATOR", False)):
+        from tr_bot.promotion.comparator import comparator_passes, compare_engines
+
+        comparator_result = compare_engines(write_artifacts=True)
+        if not comparator_passes(comparator_result):
+            out = {
+                "ok": False,
+                "reason": "comparator_failed",
+                "comparator": comparator_result,
+                "report": strategy_evaluate(profile_id=pid, tier=to_tier),
+            }
+            _append_log(root, out, pid, to_tier, passed=False)
+            notify(
+                notify_events.PROMOTION_REJECTED,
+                reason="comparator_failed",
+                to_tier=to_tier,
+                profile_id=pid,
+            )
+            return out
+
     if dry_run:
         return {
             "ok": True,
@@ -107,6 +136,7 @@ def strategy_promote(
             "profile_id": pid,
             "to_tier": to_tier,
             "report": strategy_evaluate(profile_id=pid, tier=to_tier),
+            "comparator": comparator_result,
         }
 
     now = datetime.now(timezone.utc).isoformat()

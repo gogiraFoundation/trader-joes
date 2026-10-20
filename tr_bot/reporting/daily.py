@@ -27,6 +27,9 @@ DAILY_REPORT_CONFIG_KEYS: tuple[str, ...] = (
     "ADX_MAX_FOR_MEAN_REVERSION",
     "ADX_MIN_FOR_TREND",
     "TREND_STRATEGY_ENABLED",
+    "STRATEGY_ENGINE",
+    "SMC_MIN_TRADE_SCORE",
+    "EXIT_MODE",
     "BACKTEST_FEE_BPS",
     "LIVE_FEE_BPS",
     "MAX_TRADES_PER_DAY",
@@ -37,6 +40,16 @@ DAILY_REPORT_CONFIG_KEYS: tuple[str, ...] = (
 
 def _artifacts_root() -> Path:
     return Path(config.ARTIFACTS_DIR).resolve()
+
+
+def _read_smc_go_no_go(root: Path) -> dict[str, Any] | None:
+    p = root / "research" / "smc_go_no_go.json"
+    if not p.is_file():
+        return None
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, TypeError):
+        return None
 
 
 def resolve_decision_audit_jsonl(artifacts_root: Path | None = None) -> Path | None:
@@ -335,6 +348,11 @@ def build_daily_report_payload(
         "backtest_last_run": bt,
         "backtest_adaptation_gate": gate_block,
         "config_snapshot": config_snapshot,
+        "strategy_engine": {
+            "strategy_engine": str(getattr(config, "STRATEGY_ENGINE", "legacy") or "legacy"),
+            "exit_mode": str(getattr(config, "EXIT_MODE", "atr") or "atr"),
+            "smc_go_no_go": _read_smc_go_no_go(root),
+        },
     }
 
 
@@ -369,6 +387,14 @@ def render_daily_report_markdown(payload: dict[str, Any]) -> str:
     else:
         for k, v in top5:
             lines.append(f"  - {k}: {v}")
+    lines.extend(["", "## Strategy engine / SMC"])
+    eng = payload.get("strategy_engine") or {}
+    lines.append(f"- STRATEGY_ENGINE: **{eng.get('strategy_engine') or meta.get('strategy_engine') or '—'}**")
+    go = eng.get("smc_go_no_go") or {}
+    if go:
+        lines.append(f"- SMC go/no-go: **{go.get('passed')}** — {'; '.join(go.get('reasons') or []) or '—'}")
+    else:
+        lines.append("- SMC go/no-go: (no artifact)")
     lines.extend(["", "## Regime"])
     rg = payload.get("regime") or {}
     mix = rg.get("mix_pct_range_trend") or {}

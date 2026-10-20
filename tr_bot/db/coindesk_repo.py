@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import json
 import logging
+import weakref
 from datetime import datetime, timezone
 from typing import Any, Sequence
 
@@ -13,7 +13,7 @@ from tr_bot.db.coindesk_schema import ensure_coindesk_schema
 
 logger = logging.getLogger("tr_bot.db.coindesk_repo")
 
-_SCHEMA_ATTR = "_tr_bot_coindesk_schema_ready"
+_SCHEMA_READY: weakref.WeakSet[Any] = weakref.WeakSet()
 
 
 def connect() -> Any:
@@ -22,6 +22,7 @@ def connect() -> Any:
     # TCP keepalives reduce idle drops behind NAT / poolers while OHLCV rows are built or HTTP runs elsewhere.
     return psycopg2.connect(
         config.DATABASE_URL,
+        connect_timeout=10,
         keepalives=1,
         keepalives_idle=30,
         keepalives_interval=10,
@@ -33,10 +34,8 @@ def ping(conn: Any) -> None:
     """Cheap liveness check; fails fast if the session is unusable."""
     with conn.cursor() as cur:
         cur.execute("SELECT 1")
-    try:
-        conn.commit()
-    except Exception:
-        pass
+    # Rollback ends the implicit read-only transaction; do not swallow errors — a failed rollback means dead session.
+    conn.rollback()
 
 
 def safe_close(conn: Any | None) -> None:
@@ -69,10 +68,10 @@ def is_recoverable_connection_error(exc: BaseException) -> bool:
 
 def ensure_schema(conn: Any) -> None:
     """Run idempotent DDL once per connection (not process-global — avoids stale skip on new sessions)."""
-    if getattr(conn, _SCHEMA_ATTR, False):
+    if conn in _SCHEMA_READY:
         return
     ensure_coindesk_schema(conn)
-    setattr(conn, _SCHEMA_ATTR, True)
+    _SCHEMA_READY.add(conn)
 
 
 def log_rate_limit_event(
@@ -184,6 +183,7 @@ def upsert_ohlcv_rows(conn: Any, rows: Sequence[dict[str, Any]]) -> int:
     ensure_schema(conn)
     from psycopg2.extras import execute_values
 
+    chunk_size = max(1, int(config.COINDESK_OHLCV_UPSERT_CHUNK))
     batch: list[tuple[Any, ...]] = []
     for r in rows:
         ts_ms = int(r["timestamp_ms"])
@@ -203,10 +203,7 @@ def upsert_ohlcv_rows(conn: Any, rows: Sequence[dict[str, Any]]) -> int:
                 str(r.get("source") or "coindesk"),
             )
         )
-    with conn.cursor() as cur:
-        execute_values(
-            cur,
-            """
+    insert_sql = """
             INSERT INTO coindesk_ohlcv (
                 time, market, instrument, timeframe, open, high, low, close, volume, ccseq, source
             ) VALUES %s
@@ -217,12 +214,16 @@ def upsert_ohlcv_rows(conn: Any, rows: Sequence[dict[str, Any]]) -> int:
                 close = EXCLUDED.close,
                 volume = EXCLUDED.volume,
                 ccseq = COALESCE(EXCLUDED.ccseq, coindesk_ohlcv.ccseq)
-            """,
-            batch,
-        )
-    conn.commit()
-    record_rows_written("coindesk_ohlcv", len(batch))
-    return len(batch)
+            """
+    total = 0
+    for i in range(0, len(batch), chunk_size):
+        part = batch[i : i + chunk_size]
+        with conn.cursor() as cur:
+            execute_values(cur, insert_sql, part)
+        conn.commit()
+        record_rows_written("coindesk_ohlcv", len(part))
+        total += len(part)
+    return total
 
 
 def insert_orderbook(conn: Any, ob: dict[str, Any]) -> None:
@@ -372,7 +373,6 @@ def export_ohlcv_parquet(
     market: str | None = None,
     limit: int = 50_000,
 ) -> str:
-    import pandas as pd
 
     df = load_ohlcv_dataframe(conn, instrument=instrument, timeframe=timeframe, market=market, limit=limit)
     df["source"] = "coindesk"

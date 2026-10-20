@@ -5,7 +5,11 @@ from __future__ import annotations
 import pandas as pd
 
 
-def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
+def _group_cols(df: pd.DataFrame) -> list[str]:
+    return [c for c in ("source", "asset") if c in df.columns]
+
+
+def _compute_indicators_ungrouped(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
     out["ema20"] = out["close"].ewm(span=20).mean()
     out["ema50"] = out["close"].ewm(span=50).mean()
@@ -30,6 +34,26 @@ def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
     # Wilder-style ATR smoothing for more stable volatility-aware sizing.
     out["atr"] = tr.ewm(alpha=1.0 / 14.0, adjust=False).mean()
     return out
+
+
+def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    EMA / RSI / ATR on OHLCV.
+
+    When ``source`` and/or ``asset`` columns are present, indicators are computed
+    per group so multi-asset concat frames do not bleed across series.
+    """
+    group_cols = _group_cols(df)
+    if not group_cols:
+        return _compute_indicators_ungrouped(df)
+
+    out = df.copy()
+    sort_keys = list(group_cols)
+    if "timestamp" in out.columns:
+        sort_keys.append("timestamp")
+    out = out.sort_values(sort_keys, kind="mergesort")
+    pieces = [_compute_indicators_ungrouped(g) for _, g in out.groupby(group_cols, sort=False)]
+    return pd.concat(pieces, ignore_index=False)
 
 
 def compute_all_indicators(df: pd.DataFrame) -> pd.DataFrame:

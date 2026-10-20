@@ -1,0 +1,300 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>tr_bot — Scheduler &amp; startup</title>
+  <script src="/dashboard/vendor/tailwindcdn.js"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            surface: { DEFAULT: '#0a0e12', card: '#121820', border: '#1e2a38' },
+            accent: { DEFAULT: '#04c3fb', muted: '#64748b' }
+          },
+          fontFamily: { sans: ['ui-sans-serif', 'system-ui', 'sans-serif'] }
+        }
+      }
+    };
+  </script>
+  <link rel="stylesheet" href="/dashboard/dashboard.css" />
+<script src="/dashboard/js/common.js"></script>
+</head>
+<body class="bg-surface min-h-screen text-slate-100 font-sans antialiased">
+  <div id="auth-gate" class="hidden fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4">
+    <div class="bg-surface-card border border-surface-border rounded-xl p-6 max-w-md w-full shadow-xl">
+      <h2 class="text-lg font-semibold text-white mb-2">Dashboard token required</h2>
+      <p class="text-sm text-slate-400 mb-4">Enter the same <code class="text-accent">DASHBOARD_TOKEN</code> as the main dashboard. Stored in session only.</p>
+      <input id="token-input" type="password" placeholder="Token" class="w-full rounded-lg bg-surface border border-surface-border px-3 py-2 text-sm mb-3 focus:outline-none focus:ring-2 focus:ring-accent" />
+      <button type="button" id="token-save" class="w-full rounded-lg bg-sky-600 hover:bg-sky-500 py-2 text-sm font-medium">Save &amp; reload</button>
+    </div>
+  </div>
+
+  <div id="dashboard-header"></div>
+
+  <main class="max-w-7xl mx-auto px-4 py-6 space-y-6">
+    <p id="error-banner" class="hidden rounded-lg border border-red-500/50 bg-red-950/40 px-4 py-3 text-sm text-red-200"></p>
+
+    <section class="rounded-xl border border-surface-border bg-surface-card p-6 shadow-lg">
+      <h2 class="text-sm font-semibold text-white mb-4">Scheduler config</h2>
+      <dl id="scheduler-dl" class="grid grid-cols-1 sm:grid-cols-2 gap-x-8 gap-y-3 text-sm"></dl>
+      <p id="sched-hint" class="mt-6 text-xs text-slate-500 leading-relaxed"></p>
+    </section>
+
+    <section class="rounded-xl border border-surface-border bg-surface-card p-6 shadow-lg">
+      <h2 class="text-sm font-semibold text-white mb-4">Last training run</h2>
+      <p id="train-summary" class="text-sm text-slate-300">—</p>
+      <p id="train-meta" class="text-xs text-slate-500 mt-2">—</p>
+      <p id="train-time" class="text-xs text-slate-500 mt-1">—</p>
+      <p id="train-err" class="hidden text-xs text-rose-300 mt-2"></p>
+    </section>
+
+    <section class="rounded-xl border border-surface-border bg-surface-card p-6 shadow-lg">
+      <h2 class="text-sm font-semibold text-white mb-4">Last backtest run</h2>
+      <div class="flex flex-wrap items-center gap-2 mb-2">
+        <span id="bt-pill" class="px-3 py-1 rounded-full text-xs font-medium bg-slate-700">—</span>
+      </div>
+      <p id="bt-meta" class="text-xs text-slate-500">—</p>
+      <p id="bt-stats" class="text-sm text-slate-300 mt-2">—</p>
+      <p id="bt-err" class="hidden text-xs text-rose-300 mt-2"></p>
+    </section>
+
+    <section class="rounded-xl border border-surface-border bg-surface-card p-6 shadow-lg">
+      <h2 class="text-sm font-semibold text-white mb-2">Startup pipeline</h2>
+      <p id="startup-head" class="text-sm text-slate-300">—</p>
+      <p id="startup-time" class="text-xs text-slate-500 mt-2">—</p>
+      <div id="startup-stages" class="mt-4 space-y-2"></div>
+      <details class="mt-4">
+        <summary class="text-xs text-slate-500 cursor-pointer hover:text-slate-400">Raw result JSON</summary>
+        <pre id="startup-raw" class="mt-2 text-[11px] text-slate-400 font-mono whitespace-pre-wrap break-all max-h-64 overflow-y-auto rounded border border-surface-border p-3 bg-surface/80">—</pre>
+      </details>
+    </section>
+
+    <footer class="text-xs text-slate-500">
+      <span id="refresh-note">Auto-refresh every 20s</span>
+      · <code class="text-slate-400">scheduler</code>, <code class="text-slate-400">startup_pipeline</code>, <code class="text-slate-400">training</code>, <code class="text-slate-400">backtest</code>
+    </footer>
+  </main>
+
+  <script>
+    const $ = TRDashboard.$;
+    const fmtUtc = TRDashboard.fmtUtc;
+
+    function fmtSecondsLabel(sec) {
+      if (sec == null || sec === '') return '—';
+      const n = Number(sec);
+      if (!Number.isFinite(n)) return String(sec);
+      if (n === 0) return '0s';
+      const parts = [];
+      const h = Math.floor(n / 3600);
+      const m = Math.floor((n % 3600) / 60);
+      const s = Math.floor(n % 60);
+      if (h) parts.push(h + 'h');
+      if (m) parts.push(m + 'm');
+      if (s || parts.length === 0) parts.push(s + 's');
+      return n + 's (' + parts.join(' ') + ')';
+    }
+
+    function pillStatus(data) {
+      TRDashboard.pillStatus('pill-status', data);
+    }
+
+    function renderScheduler(sch) {
+      sch = sch || {};
+      const rows = [
+        ['enabled', sch.enabled],
+        ['tick_seconds', sch.tick_seconds, fmtSecondsLabel(sch.tick_seconds)],
+        ['initial_delay_seconds', sch.initial_delay_seconds, fmtSecondsLabel(sch.initial_delay_seconds)],
+        ['training_interval_seconds', sch.training_interval_seconds, fmtSecondsLabel(sch.training_interval_seconds)],
+        ['backtest_interval_seconds', sch.backtest_interval_seconds, fmtSecondsLabel(sch.backtest_interval_seconds)],
+        ['promotion_interval_seconds', sch.promotion_interval_seconds, fmtSecondsLabel(sch.promotion_interval_seconds)],
+        ['coindesk_asset_top_list_interval_seconds', sch.coindesk_asset_top_list_interval_seconds, fmtSecondsLabel(sch.coindesk_asset_top_list_interval_seconds)],
+        ['run_training_on_start', sch.run_training_on_start],
+        ['run_backtest_on_start', sch.run_backtest_on_start],
+        ['run_promotion_on_start', sch.run_promotion_on_start],
+        ['run_coindesk_asset_top_list_on_start', sch.run_coindesk_asset_top_list_on_start],
+      ];
+      const dl = $('scheduler-dl');
+      if (!dl) return;
+      dl.innerHTML = rows.map(([k, v, human]) => {
+        const display = human !== undefined ? String(human) : (v === true ? 'true' : v === false ? 'false' : (v != null ? String(v) : '—'));
+        return '<dt class="text-slate-500">' + k + '</dt><dd class="font-mono text-slate-200">' + display + '</dd>';
+      }).join('');
+
+      const sh = $('sched-hint');
+      if (sh) {
+        const ti = sch.training_interval_seconds != null ? sch.training_interval_seconds : 0;
+        const bi = sch.backtest_interval_seconds != null ? sch.backtest_interval_seconds : 0;
+        const en = sch.enabled === true;
+        sh.textContent = 'Run: ./start.sh --scheduler or python -m tr_bot.scheduler. ' +
+          'enabled=' + en + ' · train_every=' + ti + 's · backtest_every=' + bi + 's · tick=' +
+          (sch.tick_seconds != null ? sch.tick_seconds : '—') + 's · on_start train=' +
+          (sch.run_training_on_start === true) + ' backtest=' + (sch.run_backtest_on_start === true) +
+          ' promotion=' + (sch.run_promotion_on_start === true) + ' coindesk_top_list=' +
+          (sch.run_coindesk_asset_top_list_on_start === true);
+      }
+    }
+
+    function renderTrainingLast(t) {
+      t = t || {};
+      const lr = t.last_run;
+      const sum = $('train-summary');
+      const tim = $('train-time');
+      const meta = $('train-meta');
+      const te = $('train-err');
+      if (!sum) return;
+      if (!lr) {
+        sum.textContent = 'No training last_run.json yet.';
+        if (meta) meta.textContent = '—';
+        if (tim) tim.textContent = '—';
+        if (te) { te.textContent = ''; te.classList.add('hidden'); }
+        return;
+      }
+      const ok = lr.ok === true;
+      sum.textContent = (ok ? 'Last run: OK' : 'Last run: failed') + (lr.reason ? ' — ' + lr.reason : '');
+      if (meta) {
+        const rows = lr.feature_rows != null ? 'feature_rows: ' + lr.feature_rows : '';
+        const stg = lr.stage ? 'stage: ' + lr.stage : '';
+        meta.textContent = [rows, stg].filter(Boolean).join(' · ') || '—';
+      }
+      if (tim) tim.textContent = lr.finished_utc ? 'Finished: ' + fmtUtc(lr.finished_utc) : '—';
+      if (te) {
+        if (lr.error) {
+          te.textContent = lr.error;
+          te.classList.remove('hidden');
+        } else {
+          te.textContent = '';
+          te.classList.add('hidden');
+        }
+      }
+    }
+
+    function renderBacktestLast(bt) {
+      bt = bt || {};
+      const lr = bt.last_run;
+      const bcfg = bt.config || {};
+      const pill = $('bt-pill');
+      if (pill) {
+        if (!lr) {
+          pill.textContent = 'No backtest_last_run.json';
+          pill.className = 'px-3 py-1 rounded-full text-xs font-medium bg-slate-700 text-slate-300';
+        } else if (lr.ok === true) {
+          pill.textContent = 'Last backtest: OK';
+          pill.className = 'px-3 py-1 rounded-full text-xs font-medium bg-emerald-900/60 text-emerald-300';
+        } else {
+          pill.textContent = 'Last backtest: failed';
+          pill.className = 'px-3 py-1 rounded-full text-xs font-medium bg-rose-900/60 text-rose-300';
+        }
+      }
+      const bm = $('bt-meta');
+      if (bm) {
+        const sym = lr && lr.symbol ? lr.symbol : '—';
+        const tf = lr && lr.timeframe ? lr.timeframe : '—';
+        const bars = lr && lr.bars_total != null ? lr.bars_total : '—';
+        const bb = bcfg.backtest_bars != null ? bcfg.backtest_bars : '—';
+        bm.textContent = sym + ' · ' + tf + ' · bars=' + bars + ' · BACKTEST_BARS=' + bb;
+      }
+      const stats = $('bt-stats');
+      if (stats) {
+        if (lr && lr.finished_utc) {
+          let line = 'Finished ' + fmtUtc(lr.finished_utc);
+          if (lr.total_return_pct != null) line += ' · return ' + Number(lr.total_return_pct).toFixed(2) + '%';
+          if (lr.max_drawdown_pct != null) line += ' · max DD ' + Number(lr.max_drawdown_pct).toFixed(2) + '%';
+          if (lr.trades != null) {
+            const w = lr.wins != null ? lr.wins : '—';
+            const l = lr.losses != null ? lr.losses : '—';
+            line += ' · trades ' + lr.trades + ' (' + w + ' W / ' + l + ' L)';
+          }
+          stats.textContent = line;
+        } else {
+          stats.textContent = '—';
+        }
+      }
+      const be = $('bt-err');
+      if (be) {
+        if (lr && lr.error) {
+          be.textContent = lr.error;
+          be.classList.remove('hidden');
+        } else {
+          be.textContent = '';
+          be.classList.add('hidden');
+        }
+      }
+    }
+
+    function stageLine(name, st) {
+      if (!st || typeof st !== 'object') return '';
+      const hasPassed = typeof st.passed === 'boolean';
+      const good = hasPassed ? st.passed === true : st.ok === true;
+      const bad = hasPassed ? st.passed === false : st.ok === false;
+      const status = good ? (hasPassed ? 'passed' : 'ok') : bad ? (hasPassed ? 'not passed' : 'fail') : '—';
+      const reason = st.reason || st.error || '';
+      const cls = good ? 'text-emerald-400' : bad ? 'text-rose-300' : 'text-slate-400';
+      return '<div class="flex flex-wrap gap-2 text-sm border-b border-surface-border/40 py-2">' +
+        '<span class="font-mono text-slate-400 w-48 shrink-0">' + name + '</span>' +
+        '<span class="' + cls + ' w-28 shrink-0">' + status + '</span>' +
+        (reason ? '<span class="text-slate-500 text-xs break-all">' + String(reason) + '</span>' : '') +
+        '</div>';
+    }
+
+    function renderStartup(sp) {
+      const head = $('startup-head');
+      const tim = $('startup-time');
+      const stagesEl = $('startup-stages');
+      const raw = $('startup-raw');
+      if (!head) return;
+      if (!sp) {
+        head.textContent = 'No startup pipeline result recorded yet.';
+        if (tim) tim.textContent = '—';
+        if (stagesEl) stagesEl.innerHTML = '';
+        if (raw) raw.textContent = '—';
+        return;
+      }
+      const ok = sp.passed === true;
+      const reason = sp.reason || 'ok';
+      head.textContent = 'Last run: ' + (ok ? 'passed' : 'failed') + (sp.reason ? ' (' + reason + ')' : '');
+      if (tim) tim.textContent = 'UTC: ' + (sp.utc ? fmtUtc(sp.utc) : '—');
+      const result = sp.result || {};
+      const stages = result.stages || {};
+      const order = ['preflight', 'train', 'training_validation_gate', 'tune', 'backtest', 'backtest_gate'];
+      if (stagesEl) {
+        let html = '';
+        order.forEach((k) => {
+          if (stages[k] !== undefined) html += stageLine(k, stages[k]);
+        });
+        Object.keys(stages).sort().forEach((k) => {
+          if (order.indexOf(k) === -1) html += stageLine(k, stages[k]);
+        });
+        stagesEl.innerHTML = html || '<p class="text-xs text-slate-500">No stages in result.</p>';
+      }
+      if (raw) {
+        try {
+          raw.textContent = JSON.stringify(result, null, 2);
+        } catch (e) {
+          raw.textContent = String(result);
+        }
+      }
+    }
+
+    function render(data) {
+      $('error-banner').classList.add('hidden');
+      pillStatus(data);
+      renderScheduler(data.scheduler);
+      renderTrainingLast(data.training);
+      renderBacktestLast(data.backtest);
+      renderStartup(data.startup_pipeline);
+    }
+
+    async function loadSummary() {
+      const data = await TRDashboard.fetchDashboardJson('/api/dashboard/summary?sections=' + encodeURIComponent('scheduler,training,backtest'));
+      if (data === null) return;
+      render(data);
+    }
+
+    TRDashboard.mountHeader({ title: 'Jobs & startup', subtitle: 'Intervals, training, and backtest jobs', showRedis: false, showMode: false });
+    TRDashboard.wireTokenGate(loadSummary);
+    TRDashboard.startPolling(loadSummary, 20000);
+  </script>
+</body>
+</html>

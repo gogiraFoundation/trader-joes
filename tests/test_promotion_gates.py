@@ -57,6 +57,44 @@ def test_input_hash_stable() -> None:
     assert len(h1) == 16
 
 
+def test_ledger_rows_require_exact_hash() -> None:
+    from tr_bot.promotion import gates
+
+    rows = [
+        {"profile_id": "p1", "profile_hash": "abc", "outcome": "win"},
+        {"profile_id": "p1", "profile_hash": "", "outcome": "win"},
+        {"profile_id": "p1", "outcome": "loss"},
+        {"profile_id": "p1", "profile_hash": "zzz", "outcome": "win"},
+        {"profile_id": "other", "profile_hash": "abc", "outcome": "win"},
+        {"outcome": "win"},  # legacy untagged
+    ]
+    matched = gates._ledger_rows_for_profile(rows, "p1", profile_hash="abc", strict=True)
+    assert len(matched) == 1
+    assert matched[0]["profile_hash"] == "abc"
+
+
+def test_ledger_rows_missing_hash_excluded_when_hash_requested() -> None:
+    from tr_bot.promotion import gates
+
+    rows = [
+        {"profile_id": "p1", "outcome": "win"},
+        {"profile_id": "p1", "profile_hash": None, "outcome": "loss"},
+    ]
+    matched = gates._ledger_rows_for_profile(rows, "p1", profile_hash="abc", strict=False)
+    assert matched == []
+
+
+def test_ledger_rows_without_hash_still_match_id() -> None:
+    from tr_bot.promotion import gates
+
+    rows = [
+        {"profile_id": "p1", "outcome": "win"},
+        {"profile_id": "p1", "profile_hash": "x", "outcome": "loss"},
+    ]
+    matched = gates._ledger_rows_for_profile(rows, "p1", profile_hash=None, strict=True)
+    assert len(matched) == 2
+
+
 def test_gate_equity_drawdown_no_points_fails(monkeypatch: pytest.MonkeyPatch) -> None:
     from tr_bot.promotion import gates
 

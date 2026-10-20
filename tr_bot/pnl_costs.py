@@ -56,6 +56,8 @@ def realized_pnl_breakdown(
     size: float,
     fee_bps: float,
     slip_bps: float,
+    *,
+    exit_price_assumption: str = "bar_close",
 ) -> dict[str, Any]:
     """
     Net P&L in quote units (USDT for USDT pairs) using same cost model as backtest.
@@ -73,5 +75,5 @@ def realized_pnl_breakdown(
         "net_pnl_usdt": float(net),
         "gross_pnl_usdt": float(gross),
         "fee_usdt": float(fee),
-        "exit_price_assumption": "bar_close",
+        "exit_price_assumption": exit_price_assumption,
     }

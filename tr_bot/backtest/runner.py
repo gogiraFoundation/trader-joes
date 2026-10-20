@@ -15,13 +15,16 @@ from tr_bot.analysis.fundamentals import allows_fundamentals
 from tr_bot.decision import decision_engine
 from tr_bot.indicators import compute_all_indicators
 from tr_bot.logger import setup_logger
-from tr_bot.market_data import fetch_ohlcv
+from tr_bot.market_data import fetch_ohlcv_deep
 from tr_bot.notifications import events as notify_events
 from tr_bot.notifications.facade import notify
+from tr_bot.exit_plan import build_exit_plan, simulate_software_polled_exit_price
 from tr_bot.position import OpenPosition
+from tr_bot.replay import replay_bar_exchange_native, replay_bar_software_polled
 from tr_bot.regime import RegimeModel
 from tr_bot.quote_usdt import QuoteUsdtRateError, usdt_per_quote_unit
 from tr_bot.risk import RiskManager
+from tr_bot.strategy.tier import apply_backtest_notional_cap, atr_meets_min_pct
 from tr_bot.symbols import split_pair
 from tr_bot.signals import mean_reversion_signal, trend_continuation_signal
 from tr_bot.ta_extended import mean_reversion_ta_allows, trend_regime_ta_allows
@@ -145,7 +148,27 @@ class _BacktestDailyOpenLimiter:
         self._opens += 1
 
 
+def _backtest_exit_fill_price(pos: OpenPosition, bar: pd.Series, outcome: str) -> float:
+    """Policy-aware exit fill for backtest (shared with replay parity)."""
+    plan = pos.exit_plan()
+    policy = str(getattr(config, "BACKTEST_EXIT_POLICY", getattr(config, "EXIT_POLICY", "software_polled")))
+    if policy == "exchange_native":
+        ev = replay_bar_exchange_native(plan, bar)
+    else:
+        ev = replay_bar_software_polled(plan, bar)
+    if ev.exit_price is not None:
+        return float(ev.exit_price)
+    return simulate_software_polled_exit_price(
+        side=plan.side,
+        stop_price=plan.stop_price,
+        take_price=plan.take_price,
+        bar=bar,
+        outcome=outcome,
+    )
+
+
 def _exit_price(side: str, entry: float, atr: float, outcome: str) -> float:
+    """Legacy ATR-only exit (kept for tests); prefer _backtest_exit_fill_price."""
     if side == "long":
         if outcome == "loss":
             return entry - atr
@@ -199,6 +222,14 @@ def _safe_float(x: Any) -> float | None:
         return None if math.isnan(v) else v
     except (TypeError, ValueError):
         return None
+
+
+def _signal_branch_legacy(regime: str) -> str:
+    if regime == "range":
+        return "mean_reversion"
+    if regime == "trend" and config.TREND_STRATEGY_ENABLED:
+        return "trend"
+    return "none"
 
 
 def _signal_strength_allows(regime: str, signal: str, last: Any) -> tuple[bool, str | None]:
@@ -608,7 +639,7 @@ def run_backtest_on_dataframe(
         if pos is not None:
             exited, outcome = pos.check_bar(bar)
             if exited and outcome:
-                xp = _exit_price(pos.side, pos.entry_price, pos.atr, outcome)
+                xp = _backtest_exit_fill_price(pos, bar, str(outcome))
                 close_now, xp, close_size = _exit_realism_model(
                     rng=rng,
                     side=pos.side,
@@ -644,29 +675,79 @@ def run_backtest_on_dataframe(
                 continue
 
         regime, regime_confidence = model.predict_with_confidence(window)
-        if regime == "range":
-            signal = mean_reversion_signal(window)
-            ta_ok = True if skip_ta else mean_reversion_ta_allows(last)
-        elif regime == "trend" and config.TREND_STRATEGY_ENABLED:
-            signal = trend_continuation_signal(window)
-            ta_ok = True if skip_ta else trend_regime_ta_allows(last)
-        else:
-            signal = "hold"
+        smc_audit: dict[str, Any] = {}
+        engine = str(getattr(config, "STRATEGY_ENGINE", "legacy") or "legacy").lower()
+        use_smc = engine == "smc"
+        if use_smc:
+            from tr_bot.strategy.market_context import empty_context
+            from tr_bot.strategy.signal_pipeline import analyze_symbol, proposal_to_decision
+
+            ctx = empty_context(
+                ml_regime=regime,
+                regime_confidence=float(regime_confidence),
+            )
+            # Single-TF backtest: map window to all configured TFs for SMC pipeline.
+            dfs = {
+                str(getattr(config, "SMC_HTF_TIMEFRAME", "4h")): window,
+                str(getattr(config, "SMC_PRIMARY_TIMEFRAME", "1h")): window,
+                str(getattr(config, "SMC_ENTRY_TIMEFRAME", "15m")): window,
+                str(getattr(config, "SMC_EXEC_TIMEFRAME", timeframe)): window,
+                str(timeframe): window,
+            }
+            proposal = analyze_symbol(symbol, dfs_by_tf=dfs, context=ctx)
+            decision = proposal_to_decision(proposal)
+            signal = proposal.direction if proposal else "hold"
             ta_ok = True
-        fundamentals_ok = _fundamentals_ok_for_backtest(symbol, signal, fund_mode)
-        decision = decision_engine(
-            regime,
-            signal,
-            sentiment,
-            ta_ok=ta_ok,
-            fundamentals_ok=fundamentals_ok,
-            trend_strategy_enabled=config.TREND_STRATEGY_ENABLED,
-        )
+            fundamentals_ok = True
+            if decision in ("buy", "sell"):
+                fundamentals_ok = _fundamentals_ok_for_backtest(symbol, decision, fund_mode)
+                if not fundamentals_ok:
+                    decision = "hold"
+                    if proposal is not None and not proposal.blocked_gate:
+                        proposal.blocked_gate = "fundamentals_block"
+            smc_audit = {
+                "score": proposal.score if proposal else None,
+                "score_components": proposal.score_components if proposal else None,
+                "pipeline_steps": proposal.pipeline_steps if proposal else None,
+                "blocked_gate": proposal.blocked_gate if proposal else None,
+                "smc_factors": proposal.smc_factors if proposal else None,
+            }
+            pending_smc_levels = (
+                {
+                    "stop": proposal.stop,
+                    "target": proposal.target,
+                    "score": proposal.score,
+                    "score_components": proposal.score_components,
+                    "exit_mode": str(getattr(config, "EXIT_MODE", "atr")),
+                }
+                if proposal and proposal.is_actionable
+                else None
+            )
+        else:
+            pending_smc_levels = None
+            if regime == "range":
+                signal = mean_reversion_signal(window)
+                ta_ok = True if skip_ta else mean_reversion_ta_allows(last)
+            elif regime == "trend" and config.TREND_STRATEGY_ENABLED:
+                signal = trend_continuation_signal(window)
+                ta_ok = True if skip_ta else trend_regime_ta_allows(last)
+            else:
+                signal = "hold"
+                ta_ok = True
+            fundamentals_ok = _fundamentals_ok_for_backtest(symbol, signal, fund_mode)
+            decision = decision_engine(
+                regime,
+                signal,
+                sentiment,
+                ta_ok=ta_ok,
+                fundamentals_ok=fundamentals_ok,
+                trend_strategy_enabled=config.TREND_STRATEGY_ENABLED,
+            )
         if config.BACKTEST_ENFORCE_REGIME_CONFIDENCE and regime_confidence < float(
             config.REGIME_MIN_CONFIDENCE
         ):
             decision = "hold"
-        if config.BACKTEST_ENFORCE_SIGNAL_STRENGTH and decision != "hold":
+        if (not use_smc) and config.BACKTEST_ENFORCE_SIGNAL_STRENGTH and decision != "hold":
             strength_ok, _ = _signal_strength_allows(regime, signal, last)
             if not strength_ok:
                 decision = "hold"
@@ -677,30 +758,55 @@ def run_backtest_on_dataframe(
                     decision = "hold"
 
         if audit_stride > 0 and (i - train_end) % audit_stride == 0:
-            audit_rows.append(
-                {
-                    "i": i,
-                    "ts": int(bar.get("timestamp", 0) or 0),
-                    "regime": regime,
-                    "signal": signal,
-                    "sentiment": sentiment,
-                    "ta_ok": ta_ok,
-                    "fundamentals_ok": fundamentals_ok,
-                    "decision": decision,
-                    "regime_confidence": regime_confidence,
-                    "cooldown_bars_remaining": cooldown_bars_remaining,
-                    "circuit_tripped": circuit_tripped,
-                }
-            )
+            row_aud: dict[str, Any] = {
+                "i": i,
+                "ts": int(bar.get("timestamp", 0) or 0),
+                "regime": regime,
+                "signal": signal,
+                "sentiment": sentiment,
+                "ta_ok": ta_ok,
+                "fundamentals_ok": fundamentals_ok,
+                "decision": decision,
+                "regime_confidence": regime_confidence,
+                "cooldown_bars_remaining": cooldown_bars_remaining,
+                "circuit_tripped": circuit_tripped,
+                "strategy_engine": engine,
+            }
+            if smc_audit:
+                row_aud["smc"] = smc_audit
+            audit_rows.append(row_aud)
 
         if decision in ("buy", "sell"):
             if daily_open_limiter is not None and not daily_open_limiter.can_open():
                 pass
             else:
                 atr = float(last["atr"])
-                # Sizing uses USDT risk budget; ATR is in quote/base — scale by quote→USDT (PnL still in quote).
                 if atr > 0:
-                    size = risk.position_size(atr * quote_usdt_rate, weight=1.0)
+                    close_bt = float(last["close"])
+                    if not atr_meets_min_pct(atr, close_bt):
+                        continue
+                    side_bt = "long" if decision == "buy" else "short"
+                    exit_mode_bt = str(getattr(config, "EXIT_MODE", "atr") or "atr")
+                    exit_policy_bt = str(
+                        getattr(config, "BACKTEST_EXIT_POLICY", getattr(config, "EXIT_POLICY", "software_polled"))
+                    )
+                    struct_stop = pending_smc_levels.get("stop") if pending_smc_levels else None
+                    struct_target = pending_smc_levels.get("target") if pending_smc_levels else None
+                    try:
+                        plan_bt = build_exit_plan(
+                            side=side_bt,  # type: ignore[arg-type]
+                            entry_price=float(last["close"]),
+                            atr=atr,
+                            exit_mode=exit_mode_bt,  # type: ignore[arg-type]
+                            exit_policy=exit_policy_bt,  # type: ignore[arg-type]
+                            structural_stop=float(struct_stop) if struct_stop is not None else None,
+                            structural_target=float(struct_target) if struct_target is not None else None,
+                        )
+                    except ValueError:
+                        continue
+                    stop_distance_usdt = plan_bt.stop_distance_usdt(quote_usdt_rate)
+                    size = risk.position_size(stop_distance_usdt, weight=1.0)
+                    size = apply_backtest_notional_cap(size, close_bt, quote_usdt_rate)
                     if size > 0:
                         fill_frac = 1.0
                         if config.BACKTEST_EXECUTION_REALISM_ENABLED:
@@ -733,13 +839,28 @@ def run_backtest_on_dataframe(
                         if not limits_ok:
                             exec_stats["limits_blocked"] += 1
                             continue
-                        pos = OpenPosition(
-                            symbol=symbol,
-                            side=side,
-                            entry_price=entry,
-                            atr=atr,
-                            size=size,
+                        pos_kw: dict[str, Any] = {
+                            "symbol": symbol,
+                            "side": side,
+                            "entry_price": entry,
+                            "atr": atr,
+                            "size": size,
+                            "signal_branch": "smc" if use_smc else _signal_branch_legacy(regime),
+                            "regime_at_entry": regime,
+                            "regime_confidence_at_entry": float(regime_confidence),
+                        }
+                        if pending_smc_levels:
+                            pos_kw["exit_mode"] = pending_smc_levels.get("exit_mode") or "atr"
+                            pos_kw["structural_stop"] = pending_smc_levels.get("stop")
+                            pos_kw["structural_target"] = pending_smc_levels.get("target")
+                            pos_kw["trade_score"] = pending_smc_levels.get("score")
+                            pos_kw["score_components"] = pending_smc_levels.get("score_components")
+                        pos_kw["exit_policy"] = exit_policy_bt
+                        pos_kw["exit_plan_dict"] = plan_bt.to_dict()
+                        pos_kw["intended_risk_usdt"] = float(stop_distance_usdt) * float(size) / float(
+                            quote_usdt_rate
                         )
+                        pos = OpenPosition(**pos_kw)
                         exec_stats["opened"] += 1
                         if daily_open_limiter is not None:
                             daily_open_limiter.record_open()
@@ -835,6 +956,7 @@ def run_backtest_on_dataframe(
         "ok": True,
         "symbol": symbol,
         "timeframe": timeframe,
+        "strategy_engine": str(getattr(config, "STRATEGY_ENGINE", "legacy") or "legacy"),
         "bars_total": n,
         "bars_simulated": n - train_end,
         "trained_on_rows": train_end,
@@ -916,7 +1038,7 @@ def run_backtest_job() -> dict[str, Any]:
     tf = config.TIMEFRAME
     limit = max(200, config.BACKTEST_BARS)
     try:
-        raw = fetch_ohlcv(sym, tf, limit=limit)
+        raw = fetch_ohlcv_deep(sym, tf, limit=limit)
         if raw.empty or len(raw) < 50:
             raise RuntimeError("Not enough OHLCV for backtest")
         if config.BACKTEST_RUN_ABLATION_MATRIX:
@@ -945,3 +1067,139 @@ def run_backtest_job() -> dict[str, Any]:
         write_backtest_last_run({"ok": False, "error": err, "symbol": sym, "timeframe": tf})
         logger.exception("Backtest failed: %s", e)
         raise
+
+
+_COMPARE_METRIC_KEYS = (
+    "trades",
+    "wins",
+    "losses",
+    "total_return_pct",
+    "max_drawdown_pct",
+    "profit_factor",
+    "sharpe_ratio",
+    "sortino_ratio",
+    "final_equity",
+    "net_pnl",
+)
+
+
+def _summary_metrics(result: dict[str, Any]) -> dict[str, Any]:
+    return {k: result.get(k) for k in _COMPARE_METRIC_KEYS}
+
+
+def run_backtest_compare_engines(
+    df: pd.DataFrame | None = None,
+    *,
+    symbol: str | None = None,
+    timeframe: str | None = None,
+    write_artifacts: bool = True,
+) -> dict[str, Any]:
+    """
+    Run legacy and smc engines on identical OHLCV; write compare + go/no-go artifacts.
+    """
+    import json
+    from datetime import datetime, timezone
+    from pathlib import Path
+    from unittest.mock import patch
+
+    sym = symbol or config.SYMBOL
+    tf = timeframe or config.TIMEFRAME
+    if df is None:
+        limit = max(200, config.BACKTEST_BARS)
+        df = fetch_ohlcv_deep(sym, tf, limit=limit)
+    if df is None or df.empty or len(df) < 50:
+        return {"ok": False, "error": "Not enough OHLCV for compare"}
+
+    with patch.object(config, "STRATEGY_ENGINE", "legacy"):
+        legacy = run_backtest_on_dataframe(df, symbol=sym, timeframe=tf)
+    with patch.object(config, "STRATEGY_ENGINE", "smc"):
+        smc = run_backtest_on_dataframe(df, symbol=sym, timeframe=tf)
+
+    go = _evaluate_smc_go_no_go(legacy, smc)
+    out: dict[str, Any] = {
+        "ok": True,
+        "symbol": sym,
+        "timeframe": tf,
+        "utc": datetime.now(timezone.utc).isoformat(),
+        "legacy": _summary_metrics(legacy),
+        "smc": _summary_metrics(smc),
+        "go_no_go": go,
+        "legacy_ok": bool(legacy.get("ok")),
+        "smc_ok": bool(smc.get("ok")),
+    }
+    if write_artifacts:
+        root = Path(config.ARTIFACTS_DIR).resolve()
+        (root / "training").mkdir(parents=True, exist_ok=True)
+        (root / "research").mkdir(parents=True, exist_ok=True)
+        compare_path = root / "training" / "backtest_compare.json"
+        go_path = root / "research" / "smc_go_no_go.json"
+        compare_path.write_text(json.dumps(out, indent=2, default=str), encoding="utf-8")
+        go_path.write_text(json.dumps(go, indent=2, default=str), encoding="utf-8")
+        out["compare_path"] = str(compare_path)
+        out["go_no_go_path"] = str(go_path)
+    return out
+
+
+def _evaluate_smc_go_no_go(
+    legacy: dict[str, Any],
+    smc: dict[str, Any],
+) -> dict[str, Any]:
+    reasons: list[str] = []
+    passed = True
+    if not smc.get("ok"):
+        return {"passed": False, "reasons": ["smc_backtest_failed"], "override_allowed": True}
+
+    min_pf = getattr(config, "SMC_PROMOTION_MIN_PF", None)
+    max_dd = getattr(config, "SMC_PROMOTION_MAX_DD_PCT", None)
+
+    smc_pf = smc.get("profit_factor")
+    leg_pf = legacy.get("profit_factor")
+    smc_dd = smc.get("max_drawdown_pct")
+    leg_ret = legacy.get("total_return_pct")
+    smc_ret = smc.get("total_return_pct")
+    smc_trades = int(smc.get("trades") or 0)
+
+    if smc_trades < 3:
+        passed = False
+        reasons.append(f"smc_trades={smc_trades} need>=3")
+
+    if min_pf is not None:
+        try:
+            if smc_pf is None or float(smc_pf) < float(min_pf):
+                passed = False
+                reasons.append(f"smc_pf={smc_pf} need>={min_pf}")
+        except (TypeError, ValueError):
+            passed = False
+            reasons.append("smc_pf_invalid")
+
+    if max_dd is not None:
+        try:
+            if smc_dd is None or float(smc_dd) > float(max_dd):
+                passed = False
+                reasons.append(f"smc_dd={smc_dd} need<={max_dd}")
+        except (TypeError, ValueError):
+            passed = False
+            reasons.append("smc_dd_invalid")
+
+    # Soft compare: prefer SMC PF >= legacy when both present
+    try:
+        if smc_pf is not None and leg_pf is not None and float(smc_pf) + 1e-9 < float(leg_pf):
+            reasons.append(f"smc_pf_below_legacy smc={smc_pf} legacy={leg_pf}")
+            # Not hard-fail unless explicit min_pf was also missed
+    except (TypeError, ValueError):
+        pass
+
+    if not reasons and passed:
+        reasons.append("passed_default_gates")
+
+    return {
+        "passed": passed,
+        "reasons": reasons,
+        "override_allowed": True,
+        "legacy_return_pct": leg_ret,
+        "smc_return_pct": smc_ret,
+        "legacy_pf": leg_pf,
+        "smc_pf": smc_pf,
+        "smc_trades": smc_trades,
+        "smc_max_drawdown_pct": smc_dd,
+    }

@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>tr_bot — Risk &amp; circuit</title>
+  <script src="/dashboard/vendor/tailwindcdn.js"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            surface: { DEFAULT: '#0a0e12', card: '#121820', border: '#1e2a38' },
+            accent: { DEFAULT: '#04c3fb', muted: '#64748b' }
+          },
+          fontFamily: { sans: ['ui-sans-serif', 'system-ui', 'sans-serif'] }
+        }
+      }
+    };
+  </script>
+  <link rel="stylesheet" href="/dashboard/dashboard.css" />
+<script src="/dashboard/js/common.js"></script>
+</head>
+<body class="bg-surface min-h-screen text-slate-100 font-sans antialiased">
+  <div id="auth-gate" class="hidden fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4">
+    <div class="bg-surface-card border border-surface-border rounded-xl p-6 max-w-md w-full shadow-xl">
+      <h2 class="text-lg font-semibold text-white mb-2">Dashboard token required</h2>
+      <p class="text-sm text-slate-400 mb-4">Enter the same <code class="text-accent">DASHBOARD_TOKEN</code> as the main dashboard. Stored in session only.</p>
+      <input id="token-input" type="password" placeholder="Token" class="w-full rounded-lg bg-surface border border-surface-border px-3 py-2 text-sm mb-3 focus:outline-none focus:ring-2 focus:ring-accent" />
+      <button type="button" id="token-save" class="w-full rounded-lg bg-sky-600 hover:bg-sky-500 py-2 text-sm font-medium">Save &amp; reload</button>
+    </div>
+  </div>
+
+  <div id="dashboard-header"></div>
+
+  <main class="max-w-7xl mx-auto px-4 py-6 space-y-6">
+    <p id="error-banner" class="hidden rounded-lg border border-red-500/50 bg-red-950/40 px-4 py-3 text-sm text-red-200"></p>
+
+    <section class="rounded-xl border border-surface-border bg-surface-card p-6 shadow-lg">
+      <div class="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-4 mb-4">
+        <h2 class="text-sm font-semibold text-white">Circuit breaker</h2>
+        <div id="circ-reset-wrap" class="hidden flex flex-col items-end gap-1">
+          <button type="button" id="circ-reset-btn" class="btn-danger rounded-lg disabled:opacity-50 disabled:cursor-not-allowed px-3 py-1.5 text-xs font-medium">Reset circuit breaker</button>
+          <p id="circ-reset-status" class="text-xs text-slate-500">—</p>
+        </div>
+      </div>
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-6">
+        <div>
+          <p class="text-xs uppercase tracking-wide text-slate-500">Consecutive losses</p>
+          <p id="val-circuit" class="mt-2 text-3xl font-semibold text-white tabular-nums">—</p>
+          <p id="val-circuit-trip" class="text-sm mt-2">—</p>
+        </div>
+        <dl class="text-sm space-y-2">
+          <div class="flex justify-between gap-4"><dt class="text-slate-500">State file</dt><dd id="circ-file" class="font-mono text-slate-300">—</dd></div>
+          <div class="flex justify-between gap-4"><dt class="text-slate-500">Updated (UTC)</dt><dd id="circ-updated" class="font-mono text-slate-300">—</dd></div>
+          <div id="circ-err-row" class="hidden flex justify-between gap-4"><dt class="text-slate-500">Parse error</dt><dd id="circ-err" class="text-rose-300 text-xs break-all"></dd></div>
+        </dl>
+      </div>
+    </section>
+
+    <section class="rounded-xl border border-surface-border bg-surface-card p-6 shadow-lg">
+      <h2 class="text-sm font-semibold text-white mb-4">Tier &amp; risk</h2>
+      <dl id="tier-dl" class="grid grid-cols-1 sm:grid-cols-2 gap-x-8 gap-y-2 text-sm"></dl>
+    </section>
+
+    <section class="rounded-xl border border-surface-border bg-surface-card p-6 shadow-lg">
+      <h2 class="text-sm font-semibold text-white mb-2">Effective tier overrides</h2>
+      <p class="text-xs text-slate-500 mb-4">
+        <code class="text-slate-400">env_before_tier_apply</code> is after strategy profile overlay, before tier floors.
+        <code class="text-slate-400">effective_after_tier</code> is after <code class="text-slate-400">live_canary</code> / <code class="text-slate-400">live_full</code> minimums.
+      </p>
+      <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        <div>
+          <h3 class="text-xs font-medium uppercase tracking-wide text-slate-500 mb-2">env_before_tier_apply</h3>
+          <pre id="pre-before" class="text-[11px] leading-relaxed font-mono text-slate-300 whitespace-pre-wrap break-all rounded border border-surface-border p-4 bg-surface/80 max-h-96 overflow-y-auto">—</pre>
+        </div>
+        <div>
+          <h3 class="text-xs font-medium uppercase tracking-wide text-slate-500 mb-2">effective_after_tier</h3>
+          <pre id="pre-after" class="text-[11px] leading-relaxed font-mono text-slate-300 whitespace-pre-wrap break-all rounded border border-surface-border p-4 bg-surface/80 max-h-96 overflow-y-auto">—</pre>
+        </div>
+      </div>
+    </section>
+
+    <footer class="text-xs text-slate-500">
+      <span id="refresh-note">Auto-refresh every 20s</span>
+      · <code class="text-slate-400">circuit</code>, <code class="text-slate-400">config.effective_tier_overrides</code>
+    </footer>
+  </main>
+
+  <div id="confirm-modal" class="hidden fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4" role="dialog" aria-modal="true" aria-labelledby="confirm-title">
+    <div class="bg-surface-card border border-surface-border rounded-xl p-6 max-w-md w-full shadow-xl">
+      <h2 id="confirm-title" class="text-lg font-semibold text-white mb-2">Confirm action</h2>
+      <p id="confirm-body" class="text-sm text-slate-300 mb-4">—</p>
+      <div class="flex justify-end gap-2">
+        <button type="button" id="confirm-cancel" class="rounded-lg bg-slate-700 hover:bg-slate-600 px-3 py-2 text-sm font-medium">Cancel</button>
+        <button type="button" id="confirm-ok" class="rounded-lg bg-sky-600 hover:bg-sky-500 px-3 py-2 text-sm font-medium">Confirm</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const $ = TRDashboard.$;
+    const fmtUtc = TRDashboard.fmtUtc;
+
+    function pillStatus(data) {
+      TRDashboard.pillStatus('pill-status', data);
+    }
+
+    function prettyObj(obj) {
+      if (obj === undefined || obj === null) return '—';
+      try {
+        return JSON.stringify(obj, null, 2);
+      } catch (e) {
+        return String(obj);
+      }
+    }
+
+    function render(data) {
+      $('error-banner').classList.add('hidden');
+      pillStatus(data);
+      const cfg = data.config || {};
+      const circ = data.circuit || {};
+
+      const resetWrap = $('circ-reset-wrap');
+      if (resetWrap) {
+        if (cfg.dashboard_writes_enabled) resetWrap.classList.remove('hidden');
+        else resetWrap.classList.add('hidden');
+      }
+      const n = circ.consecutive_losses;
+      const m = circ.max_consecutive_losses != null ? circ.max_consecutive_losses : cfg.circuit_breaker_max_consecutive_losses;
+      const vc = $('val-circuit');
+      if (vc) vc.textContent = n != null && m != null ? n + ' / ' + m : '—';
+      const tripped = circ.tripped === true;
+      const vt = $('val-circuit-trip');
+      if (vt) {
+        vt.textContent = tripped ? 'Tripped — trading paused' : (n != null ? 'Within limit' : 'No state file yet');
+        vt.className = 'text-sm mt-2 ' + (tripped ? 'text-rose-400 font-medium' : 'text-slate-400');
+      }
+      const cf = $('circ-file');
+      if (cf) cf.textContent = circ.file_exists === false ? 'missing' : (circ.file_exists === true ? 'present' : '—');
+      const cu = $('circ-updated');
+      if (cu) cu.textContent = circ.updated_utc ? fmtUtc(circ.updated_utc) : '—';
+      const ce = $('circ-err');
+      const cer = $('circ-err-row');
+      if (ce && cer) {
+        if (circ.error) {
+          ce.textContent = circ.error;
+          cer.classList.remove('hidden');
+        } else {
+          ce.textContent = '';
+          cer.classList.add('hidden');
+        }
+      }
+
+      const dl = $('tier-dl');
+      if (dl) {
+        const rows = [
+          ['deployment_tier', cfg.deployment_tier],
+          ['risk_per_trade', cfg.risk_per_trade],
+          ['max_trades_per_day', cfg.max_trades_per_day],
+          ['circuit_breaker_max_consecutive_losses (config)', cfg.circuit_breaker_max_consecutive_losses],
+          ['canary_risk_multiplier', cfg.canary_risk_multiplier],
+          ['canary_max_notional_usdt', cfg.canary_max_notional_usdt],
+          ['canary_symbols_configured', cfg.canary_symbols_configured],
+        ];
+        dl.innerHTML = rows.map(([k, v]) =>
+          '<dt class="text-slate-500">' + k + '</dt><dd class="font-mono text-slate-200">' + (v != null ? String(v) : '—') + '</dd>'
+        ).join('');
+      }
+
+      const eto = cfg.effective_tier_overrides || {};
+      const before = eto.env_before_tier_apply;
+      const after = eto.effective_after_tier;
+      const pb = $('pre-before');
+      const pa = $('pre-after');
+      if (pb) pb.textContent = prettyObj(before);
+      if (pa) pa.textContent = prettyObj(after);
+    }
+
+    async function loadSummary() {
+      const data = await TRDashboard.fetchDashboardJson('/api/dashboard/summary?sections=' + encodeURIComponent('circuit,config,fund'));
+      if (data === null) return;
+      render(data);
+    }
+
+    function wireCircuitReset() {
+      const btn = $('circ-reset-btn');
+      if (!btn) return;
+      btn.addEventListener('click', async () => {
+        if (!(await TRDashboard.confirmAction({
+          title: 'Reset circuit breaker',
+          body: 'Reset the circuit breaker and allow new entries again if no other halt is active?',
+          okLabel: 'Reset',
+        }))) return;
+        const status = $('circ-reset-status');
+        btn.disabled = true;
+        if (status) status.textContent = 'Resetting…';
+        try {
+          await TRDashboard.postAction('/api/dashboard/actions/circuit-reset');
+          if (status) status.textContent = 'Reset requested — refreshes on next poll.';
+        } catch (e) {
+          if (status) status.textContent = 'Error: ' + ((e && e.message) || String(e));
+        } finally {
+          btn.disabled = false;
+        }
+      });
+    }
+
+    TRDashboard.mountHeader({ title: 'Risk & circuit', subtitle: 'Circuit trips, limits, and tier floors', showRedis: false, showMode: false });
+    TRDashboard.wireTokenGate(loadSummary);
+    wireCircuitReset();
+    TRDashboard.startPolling(loadSummary, 20000);
+  </script>
+</body>
+</html>

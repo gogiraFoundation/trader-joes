@@ -23,11 +23,15 @@ def test_build_training_dashboard_payload_includes_last_run(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(config, "ARTIFACTS_DIR", str(tmp_path))
+    monkeypatch.setattr(config, "TRAIN_EXCHANGE_SYMBOL", "BTC/USDT,ETH/USDT")
+    monkeypatch.setattr(config, "SYMBOL", "BTC/USDT")
     write_training_last_run({"ok": True, "stage": "complete", "feature_rows": 42})
     p = build_training_dashboard_payload()
     assert p["last_run"] is not None
     assert p["last_run"]["ok"] is True
     assert p["last_run"]["feature_rows"] == 42
+    assert p["config"]["train_exchange_symbols"] == ["BTC/USDT", "ETH/USDT"]
+    assert p["config"]["train_exchange_symbol"] == "BTC/USDT,ETH/USDT"
 
 
 def test_dashboard_summary_training_surfaces_last_run(

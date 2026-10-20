@@ -27,7 +27,7 @@ from tr_bot.startup.backtest_gate_thresholds import (
 )
 from tr_bot.strategy import deployment_io as dep
 from tr_bot.strategy.effective_params import effective_params_from_config_and_profile
-from tr_bot.strategy.profile import OVERLAY_PARAM_KEYS
+from tr_bot.strategy.profile import OVERLAY_PARAM_KEYS, build_profile_document
 from tr_bot.promotion import log as promotion_log
 
 logger = logging.getLogger("tr_bot.strategy.adaptation")
@@ -384,15 +384,14 @@ def _write_profile_and_pointer(
     root = _artifacts_root()
     now = datetime.now(timezone.utc).isoformat()
     hyp = hypothesis if hypothesis is not None else f"No-trade adaptation ({source})"
-    body = {
-        "profile_id": profile_id,
-        "schema_version": 1,
-        "created_at": now,
-        "parent_profile_id": config.ACTIVE_STRATEGY_PROFILE_ID or None,
-        "hypothesis": hyp,
-        "params": overlay_params_subset(params),
-    }
-    ptr = {"profile_id": profile_id, "activated_at": now, "source": source}
+    body = build_profile_document(
+        profile_id,
+        overlay_params_subset(params),
+        parent_profile_id=config.ACTIVE_STRATEGY_PROFILE_ID or None,
+        hypothesis=hyp,
+        source=source,
+    )
+    ptr = {"profile_id": profile_id, "activated_at": now, "source": source, "config_hash": body.get("config_hash")}
     prof_path = dep.strategy_profile_path(root, profile_id)
     if proposal_only:
         prop_dir = root / PROPOSALS_SUBDIR
@@ -400,8 +399,15 @@ def _write_profile_and_pointer(
         prop_file = prop_dir / f"{profile_id}.json"
         dep.atomic_write_json(prop_file, {"pointer": ptr, "profile": body})
         return {"ok": True, "proposal_path": str(prop_file), "profile_id": profile_id}
-    dep.atomic_write_json(prof_path, body)
-    dep.atomic_write_json(dep.pointer_path(root, "paper"), ptr)
+    result = dep.commit_candidate_profile(
+        root,
+        body,
+        tier="paper",
+        update_pointer=True,
+        pointer_source=source,
+    )
+    if not result.get("ok"):
+        return {"ok": False, "errors": result.get("errors"), "profile_id": profile_id}
     promotion_log.append_promotion_event(
         root,
         {
@@ -411,9 +417,10 @@ def _write_profile_and_pointer(
             "to_tier": "paper",
             "passed": True,
             "source": source,
+            "config_hash": result.get("config_hash"),
         },
     )
-    return {"ok": True, "profile_path": str(prof_path), "profile_id": profile_id}
+    return {"ok": True, "profile_path": str(prof_path), "profile_id": profile_id, "config_hash": result.get("config_hash")}
 
 
 def run_adaptation_job() -> dict[str, Any]:
@@ -423,7 +430,14 @@ def run_adaptation_job() -> dict[str, Any]:
     if not config.ADAPTATION_ENABLED:
         return {"ok": True, "skipped": "ADAPTATION_ENABLED=false"}
 
-    root = _artifacts_root()
+    eng = str(getattr(config, "STRATEGY_ENGINE", "legacy") or "legacy").lower()
+    if eng == "smc":
+        return {
+            "ok": True,
+            "skipped": "strategy_engine_smc",
+            "detail": "Auto-adaptation disabled while STRATEGY_ENGINE=smc",
+        }
+
     st = _load_state()
     streak = int(st.get("consecutive_loops_no_open") or 0)
     if streak < int(config.ADAPTATION_MIN_LOOPS_NO_OPEN):

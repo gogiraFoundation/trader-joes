@@ -11,6 +11,7 @@ from tr_bot.strategy.profile import OVERLAY_PARAM_KEYS, coerce_overlay_value
 
 PROPOSAL_SCHEMA_VERSION = 1
 
+# Hard-coded allowlist: numeric/filter thresholds only (no on/off safety switches).
 _DEFAULT_ALLOWLIST: frozenset[str] = frozenset(
     {
         "REGIME_MIN_CONFIDENCE",
@@ -18,24 +19,15 @@ _DEFAULT_ALLOWLIST: frozenset[str] = frozenset(
         "SIGNAL_MIN_RSI_DISTANCE",
         "SIGNAL_RSI_OVERSOLD",
         "SIGNAL_RSI_OVERBOUGHT",
-        "USE_SIGNAL_STRENGTH_FILTER",
         "ADX_MAX_FOR_MEAN_REVERSION",
         "ADX_MIN_FOR_TREND",
-        "TREND_STRATEGY_ENABLED",
     }
 )
 
 
 def proposal_param_allowlist() -> frozenset[str]:
-    raw = (getattr(config, "LLM_PROPOSAL_PARAM_KEYS", None) or "").strip()
-    if not raw:
-        return _DEFAULT_ALLOWLIST
-    keys: set[str] = set()
-    for part in raw.split(","):
-        k = part.strip()
-        if k and k in OVERLAY_PARAM_KEYS:
-            keys.add(k)
-    return frozenset(keys) if keys else _DEFAULT_ALLOWLIST
+    """Return the fixed LLM proposal param allowlist (not env-widened)."""
+    return _DEFAULT_ALLOWLIST
 
 
 def _bounds_check(key: str, value: Any) -> tuple[bool, str | None]:
@@ -71,8 +63,28 @@ def _bounds_check(key: str, value: Any) -> tuple[bool, str | None]:
             v = float(value)
             if not (5.0 <= v <= 60.0):
                 return False, f"{key} must be in [5, 60]"
-        elif key in ("USE_SIGNAL_STRENGTH_FILTER", "TREND_STRATEGY_ENABLED"):
-            pass
+        elif key == "SMC_MIN_TRADE_SCORE":
+            v = float(value)
+            if not (0.0 <= v <= 100.0):
+                return False, f"{key} must be in [0, 100]"
+        elif key == "SMC_MIN_SMC_FACTORS":
+            v = int(value)
+            if not (1 <= v <= 6):
+                return False, f"{key} must be in [1, 6]"
+        elif key == "STRATEGY_ENGINE":
+            if str(value).strip().lower() not in ("legacy", "smc", "shadow"):
+                return False, f"{key} must be legacy|smc|shadow"
+        elif key == "EXIT_MODE":
+            if str(value).strip().lower() not in ("atr", "structural", "hybrid"):
+                return False, f"{key} must be atr|structural|hybrid"
+        elif key in (
+            "SMC_HTF_TIMEFRAME",
+            "SMC_PRIMARY_TIMEFRAME",
+            "SMC_ENTRY_TIMEFRAME",
+            "SMC_EXEC_TIMEFRAME",
+        ):
+            if not str(value).strip():
+                return False, f"{key} must be non-empty"
     except (TypeError, ValueError) as e:
         return False, f"{key}: invalid numeric value ({e})"
     return True, None

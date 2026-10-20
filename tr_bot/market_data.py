@@ -53,6 +53,14 @@ def _fetch_ccxt_ohlcv_with_retry(
     raise RuntimeError("fetch_ohlcv: unexpected exit without data")
 
 
+def timeframe_to_ms(timeframe: str) -> int:
+    """Convert a ccxt-style timeframe string to milliseconds per bar."""
+    seconds = int(ccxt.Exchange.parse_timeframe(timeframe))
+    if seconds <= 0:
+        raise ValueError(f"invalid timeframe for ms conversion: {timeframe!r}")
+    return seconds * 1000
+
+
 def fetch_ohlcv(symbol: str, timeframe: str, limit: int) -> pd.DataFrame:
     if (
         config.USE_COINDESK_OHLCV_FROM_DB
@@ -104,3 +112,33 @@ def fetch_ohlcv(symbol: str, timeframe: str, limit: int) -> pd.DataFrame:
     return pd.DataFrame(
         data, columns=["timestamp", "open", "high", "low", "close", "volume"]
     )
+
+
+def fetch_ohlcv_deep(symbol: str, timeframe: str, limit: int) -> pd.DataFrame:
+    """
+    Fetch up to `limit` bars. For ccxt pairs when limit exceeds one page
+    (~TRAIN_EXCHANGE_CHUNK_LIMIT), paginate via fetch_exchange_ohlcv_range.
+    Yahoo / CoinDesk DB / short limits use fetch_ohlcv unchanged.
+    """
+    lim = max(1, int(limit))
+    chunk = max(1, min(int(config.TRAIN_EXCHANGE_CHUNK_LIMIT), 1000))
+    if _use_yfinance(symbol) or lim <= chunk or "/" not in symbol:
+        return fetch_ohlcv(symbol, timeframe, lim)
+
+    from tr_bot.training.exchange_history import fetch_exchange_ohlcv_range
+
+    bar_ms = timeframe_to_ms(timeframe)
+    end_ms = int(time.time() * 1000)
+    start_ms = end_ms - lim * bar_ms - bar_ms
+    logger.info(
+        "OHLCV deep fetch: %s %s limit=%s range_ms=%s..%s",
+        symbol,
+        timeframe,
+        lim,
+        start_ms,
+        end_ms,
+    )
+    df = fetch_exchange_ohlcv_range(symbol, timeframe, start_ms, end_ms)
+    if df.empty:
+        raise RuntimeError(f"deep OHLCV empty for {symbol} {timeframe}")
+    return df.tail(lim).reset_index(drop=True)

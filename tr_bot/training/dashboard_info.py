@@ -82,7 +82,22 @@ def build_training_dashboard_payload() -> dict[str, Any]:
         "train_backtest_symbol": config.TRAIN_BACKTEST_SYMBOL or config.SYMBOL,
         "train_backtest_bars": config.TRAIN_BACKTEST_BARS or config.BACKTEST_BARS,
         "train_backtest_timeframe": config.TRAIN_BACKTEST_TIMEFRAME or config.TIMEFRAME,
+        "train_exchange_symbol": config.TRAIN_EXCHANGE_SYMBOL or config.SYMBOL,
+        "train_exchange_symbols": [],
+        "train_exchange_fail_on_skip": config.TRAIN_EXCHANGE_FAIL_ON_SKIP,
+        "train_primary_asset": config.TRAIN_PRIMARY_ASSET or "",
+        "train_primary_sample_weight": float(config.TRAIN_PRIMARY_SAMPLE_WEIGHT or 1.0),
     }
+
+    try:
+        from tr_bot.training.pipeline import resolve_train_exchange_symbols
+        from tr_bot.training.regime_dataset import resolve_primary_asset_tag
+
+        cfg_out["train_exchange_symbols"] = resolve_train_exchange_symbols()
+        cfg_out["train_exchange_symbol"] = ",".join(cfg_out["train_exchange_symbols"])
+        cfg_out["train_primary_asset"] = resolve_primary_asset_tag()
+    except Exception:
+        pass
 
     parquet_path = dataset_file_path()
     dataset_payload: dict[str, Any] = {

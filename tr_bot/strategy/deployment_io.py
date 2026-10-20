@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -84,3 +85,53 @@ def read_json_file(path: Path) -> Any | None:
         return json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError, TypeError):
         return None
+
+
+def commit_candidate_profile(
+    artifacts_root: Path,
+    profile_doc: dict[str, Any],
+    *,
+    tier: str = "paper",
+    update_pointer: bool = True,
+    pointer_source: str = "candidate_commit",
+) -> dict[str, Any]:
+    """
+    Validate and atomically write profile; optionally update deployment pointer.
+    Returns {ok, profile_id, config_hash, pointer?, errors?}.
+    """
+    from tr_bot.strategy.profile import validate_candidate_profile
+
+    profile_id = str(profile_doc.get("profile_id") or "").strip()
+    if not profile_id:
+        return {"ok": False, "errors": ["missing profile_id"]}
+
+    validation = validate_candidate_profile(profile_doc, expected_profile_id=profile_id)
+    if not validation["ok"]:
+        return {"ok": False, "errors": validation["errors"], "profile_id": profile_id}
+
+    # Ensure config_hash is embedded
+    doc = dict(profile_doc)
+    doc["config_hash"] = validation["config_hash"]
+
+    prof_path = strategy_profile_path(artifacts_root, profile_id)
+    atomic_write_json(prof_path, doc)
+
+    result: dict[str, Any] = {
+        "ok": True,
+        "profile_id": profile_id,
+        "config_hash": validation["config_hash"],
+        "profile_path": str(prof_path),
+    }
+
+    if update_pointer:
+        now = datetime.now(timezone.utc).isoformat()
+        ptr = {
+            "profile_id": profile_id,
+            "activated_at": now,
+            "source": pointer_source,
+            "config_hash": validation["config_hash"],
+        }
+        atomic_write_json(pointer_path(artifacts_root, tier), ptr)
+        result["pointer"] = ptr
+
+    return result

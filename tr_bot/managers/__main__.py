@@ -14,8 +14,9 @@ from tr_bot.logger import setup_logger
 from tr_bot.managers.advise import refresh_advisory
 from tr_bot.managers.fund import FundManager
 from tr_bot.managers.portfolio import active_symbols
-from tr_bot.backtest.runner import run_backtest_job
+from tr_bot.backtest.runner import run_backtest_compare_engines, run_backtest_job
 from tr_bot.managers.training_manager import run_training_job
+from tr_bot.promotion.comparator import compare_engines
 from tr_bot.promotion.service import (
     strategy_evaluate,
     strategy_promote,
@@ -23,6 +24,8 @@ from tr_bot.promotion.service import (
     strategy_status,
 )
 from tr_bot.reporting.daily import run_daily_report_job
+from tr_bot.research.agents import run_agent
+from tr_bot.research.query import query_template
 from tr_bot.strategy.no_trade_adaptation import run_adaptation_job
 from tr_bot.strategy.proposal_apply import apply_llm_proposal_from_path
 
@@ -33,6 +36,31 @@ def _cmd_fund_snapshot() -> int:
     fund = FundManager()
     out = fund.snapshot_job()
     print(json.dumps(out, indent=2))
+    return 0
+
+
+def _cmd_rebalance_scan() -> int:
+    from tr_bot.managers.rebalancer import scan_job
+
+    out = scan_job()
+    print(json.dumps(out, indent=2, default=str))
+    return 0
+
+
+def _cmd_rebalance_trim() -> int:
+    from tr_bot import config as cfg
+    from tr_bot.managers.rebalancer import trim_job
+
+    out = trim_job()
+    print(json.dumps(out, indent=2, default=str))
+    if out.get("error") == "execute_trims_disabled" or not cfg.REBALANCER_EXECUTE_TRIMS:
+        if out.get("error") in ("execute_trims_disabled", "REBALANCER_EXECUTE_TRIMS_false"):
+            logger.warning(
+                "rebalance-trim: plan printed but REBALANCER_EXECUTE_TRIMS is false; no orders sent"
+            )
+            return 2
+    if out.get("error") and out.get("error") not in (None, "no_action_required"):
+        return 1
     return 0
 
 
@@ -130,6 +158,14 @@ def main() -> None:
     sub = p.add_subparsers(dest="cmd", required=True)
 
     sub.add_parser("fund-snapshot", help="Compute NAV, drawdown, persist fund_state.json")
+    sub.add_parser(
+        "rebalance-scan",
+        help="Phase A1: holdings drift/lag scan → artifacts/rebalancer/latest.json (no orders)",
+    )
+    sub.add_parser(
+        "rebalance-trim",
+        help="Phase A2: scan + trim if REBALANCER_EXECUTE_TRIMS=true (else plan only, exit 2)",
+    )
 
     tp = sub.add_parser("train-run", help="Run validated training + optional promote")
     tp.add_argument("--output", type=str, default=None)
@@ -211,13 +247,116 @@ def main() -> None:
         help="Print concise summary instead of full JSON",
     )
 
+    p_bc = sub.add_parser(
+        "backtest-compare",
+        help="Run legacy vs smc backtests on same bars; write go/no-go artifact",
+    )
+    p_bc.add_argument("--compact", action="store_true")
+
+    p_sc = sub.add_parser(
+        "strategy-compare",
+        help="Comparator wrapper (legacy vs smc) for promotion evidence",
+    )
+    p_sc.add_argument("--compact", action="store_true")
+
+    p_rq = sub.add_parser(
+        "research-query",
+        help="Run a fixed research query template (losing_smc|high_score_wins|recent)",
+    )
+    p_rq.add_argument("template", type=str, nargs="?", default="recent")
+    p_rq.add_argument("--limit", type=int, default=50)
+    p_rq.add_argument("--min-score", type=float, default=80.0)
+
+    p_ra = sub.add_parser(
+        "research-agent",
+        help="Run offline research agent (performance|structure|smc)",
+    )
+    p_ra.add_argument("agent", type=str, nargs="?", default="performance")
+    p_ra.add_argument("--note", type=str, default="")
+
+    p_ag = sub.add_parser(
+        "agents-run",
+        help="Run Grok/OpenAI Supervisor + Fund Manager agents (advisory; dry-run by default)",
+    )
+    p_ag.add_argument(
+        "--role",
+        type=str,
+        default="both",
+        choices=["both", "supervisor", "fund_manager"],
+        help="Which agent role(s) to run",
+    )
+    p_ag.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Force advise-only (no mutating actions)",
+    )
+    p_ag.add_argument(
+        "--compact",
+        action="store_true",
+        help="Print concise summary instead of full JSON",
+    )
+
     args = p.parse_args()
     if args.cmd == "fund-snapshot":
         sys.exit(_cmd_fund_snapshot())
+    if args.cmd == "rebalance-scan":
+        sys.exit(_cmd_rebalance_scan())
+    if args.cmd == "rebalance-trim":
+        sys.exit(_cmd_rebalance_trim())
     if args.cmd == "train-run":
         sys.exit(_cmd_train(args))
     if args.cmd == "backtest-run":
         sys.exit(_cmd_backtest(args))
+    if args.cmd == "backtest-compare":
+        out = run_backtest_compare_engines()
+        if getattr(args, "compact", False):
+            go = out.get("go_no_go") or {}
+            print(
+                "backtest-compare: ok=%s passed=%s path=%s"
+                % (out.get("ok"), go.get("passed"), out.get("compare_path"))
+            )
+        else:
+            print(json.dumps(out, indent=2, default=str))
+        sys.exit(0 if out.get("ok") else 1)
+    if args.cmd == "strategy-compare":
+        out = compare_engines()
+        if getattr(args, "compact", False):
+            go = out.get("go_no_go") or {}
+            print("strategy-compare: ok=%s passed=%s" % (out.get("ok"), go.get("passed")))
+        else:
+            print(json.dumps(out, indent=2, default=str))
+        sys.exit(0 if out.get("ok") else 1)
+    if args.cmd == "research-query":
+        out = query_template(
+            args.template,
+            limit=args.limit,
+            min_score=args.min_score,
+        )
+        print(json.dumps(out, indent=2, default=str))
+        sys.exit(0 if out.get("ok") else 1)
+    if args.cmd == "research-agent":
+        out = run_agent(args.agent, note=args.note)
+        print(json.dumps(out, indent=2, default=str))
+        sys.exit(0 if out.get("ok") else 1)
+    if args.cmd == "agents-run":
+        from tr_bot.agents.runner import run_agents_job
+
+        # --dry-run may force briefs when AGENTS_ENABLED is false; mutating runs never bypass.
+        dry = True if args.dry_run else None
+        out = run_agents_job(role=args.role, dry_run=dry, force=bool(args.dry_run))
+        if getattr(args, "compact", False):
+            print(
+                "agents-run: ok=%s dry_run=%s skipped=%s roles=%s"
+                % (
+                    out.get("ok"),
+                    out.get("dry_run"),
+                    out.get("skipped"),
+                    ",".join(r.get("role", "") for r in (out.get("roles") or [])),
+                )
+            )
+        else:
+            print(json.dumps(out, indent=2, default=str))
+        sys.exit(0 if out.get("ok") else 1)
     if args.cmd == "adaptation-run":
         logging.getLogger("tr_bot.strategy.adaptation").setLevel(logging.INFO)
         out = run_adaptation_job()

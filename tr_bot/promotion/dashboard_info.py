@@ -15,6 +15,7 @@ def build_strategy_promotion_dashboard_payload() -> dict[str, Any]:
         "pointers": st.get("pointers"),
         "deployment_tier": st.get("deployment_tier"),
         "active_strategy_profile_id": st.get("active_strategy_profile_id"),
+        "active_config_hash": getattr(config, "ACTIVE_STRATEGY_CONFIG_HASH", None),
         "promotions_frozen": st.get("promotions_frozen"),
         "last_promotion_events": st.get("promotion_log_tail"),
         "last_evaluate": {
@@ -27,5 +28,10 @@ def build_strategy_promotion_dashboard_payload() -> dict[str, Any]:
             "min_calendar_days": config.PROMOTION_MIN_CALENDAR_DAYS,
             "max_equity_drawdown_pct": config.PROMOTION_MAX_EQUITY_DRAWDOWN_PCT,
             "cooldown_hours": config.PROMOTION_COOLDOWN_HOURS,
+            "strict_ledger_filter": bool(getattr(config, "PROMOTION_STRICT_LEDGER_FILTER", False)),
+            "bootstrap_enabled": bool(getattr(config, "PROMOTION_BOOTSTRAP_ENABLED", False)),
+            "startup_backtest_min_trades": int(
+                __import__("tr_bot.startup.backtest_gate_thresholds", fromlist=["DEFAULT_MIN_TRADES"]).DEFAULT_MIN_TRADES
+            ),
         },
     }

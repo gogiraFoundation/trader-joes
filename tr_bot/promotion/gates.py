@@ -36,23 +36,68 @@ class GateReport:
 
 
 def _ledger_rows_for_profile(
-    rows: list[dict[str, Any]], profile_id: str | None
+    rows: list[dict[str, Any]],
+    profile_id: str | None,
+    *,
+    profile_hash: str | None = None,
+    strict: bool = False,
 ) -> list[dict[str, Any]]:
+    """
+    Filter closed-trade rows for promotion attribution.
+
+    When ``profile_hash`` is supplied, rows must match both ``profile_id`` and an
+    exact non-empty ``profile_hash``. Missing hashes never qualify in that mode.
+    """
     if not profile_id:
         return rows
+    want_hash = (profile_hash or "").strip() or None
     matched: list[dict[str, Any]] = []
     legacy = 0
     for r in rows:
         rp = r.get("profile_id")
+        rh = r.get("profile_hash")
         if rp == profile_id:
+            if want_hash is not None:
+                if not isinstance(rh, str) or not rh.strip() or rh.strip() != want_hash:
+                    continue
             matched.append(r)
         elif rp is None or rp == "":
             legacy += 1
     if matched:
         return matched
-    if legacy:
+    if strict:
+        return []
+    # Legacy fallback only when no hash was requested (otherwise attribution is exact).
+    if want_hash is None and legacy:
         return rows
     return []
+
+
+def gate_strict_attribution(
+    rows_all: list[dict[str, Any]],
+    rows: list[dict[str, Any]],
+    *,
+    profile_id: str | None,
+    strict: bool,
+) -> GateOutcome:
+    if not strict or not profile_id:
+        return GateOutcome(name="strict_attribution", passed=True, detail="disabled")
+    if not rows:
+        return GateOutcome(
+            name="strict_attribution",
+            passed=False,
+            detail="no_attributed_trades_for_profile",
+        )
+    unattributed = sum(
+        1
+        for r in rows_all
+        if r.get("profile_id") in (None, "") and r.get("outcome") in ("win", "loss")
+    )
+    return GateOutcome(
+        name="strict_attribution",
+        passed=True,
+        detail=f"attributed={len(rows)} legacy_untagged={unattributed}",
+    )
 
 
 def _parse_utc_date(s: str) -> datetime | None:
@@ -238,15 +283,33 @@ def build_input_hash(
     return hashlib.sha256(raw).hexdigest()[:16]
 
 
+def gate_strategy_engine_hint() -> GateOutcome:
+    """Surface active STRATEGY_ENGINE (informational; always passes)."""
+    eng = str(getattr(config, "STRATEGY_ENGINE", "legacy") or "legacy")
+    return GateOutcome(
+        name="strategy_engine",
+        passed=True,
+        detail=f"STRATEGY_ENGINE={eng}",
+    )
+
+
 def run_gates(
     artifacts_root: Path,
     *,
     profile_id: str | None,
     tier: str,
+    profile_hash: str | None = None,
 ) -> GateReport:
     rows_all = read_recent_trades(limit=50_000)
-    rows = _ledger_rows_for_profile(rows_all, profile_id)
+    strict = bool(getattr(config, "PROMOTION_STRICT_LEDGER_FILTER", False))
+    rows = _ledger_rows_for_profile(
+        rows_all,
+        profile_id,
+        profile_hash=profile_hash,
+        strict=strict,
+    )
     report = GateReport()
+    report.outcomes.append(gate_strict_attribution(rows_all, rows, profile_id=profile_id, strict=strict))
     report.outcomes.append(
         gate_min_trades(rows, int(config.PROMOTION_MIN_TRADES)),
     )
@@ -258,6 +321,46 @@ def run_gates(
     report.outcomes.append(gate_cooldown(artifacts_root))
     bt_out = gate_backtest_reference()
     report.outcomes.append(bt_out)
+    report.outcomes.append(gate_strategy_engine_hint())
+
+    floors_passed = all(
+        o.passed
+        for o in report.outcomes
+        if o.name in ("min_trades", "min_calendar_days", "strict_attribution")
+    )
+    if bool(getattr(config, "PROMOTION_BOOTSTRAP_ENABLED", False)) and floors_passed:
+        from tr_bot.promotion.stats import (
+            gate_bootstrap_expectancy,
+            gate_bootstrap_profit_factor,
+        )
+
+        report.outcomes.append(
+            gate_bootstrap_expectancy(
+                rows,
+                min_lower_bound=getattr(config, "PROMOTION_MIN_EXPECTANCY_USDT", None),
+                block_size=int(getattr(config, "PROMOTION_BOOTSTRAP_BLOCK_SIZE", 5)),
+                n_resamples=int(getattr(config, "PROMOTION_BOOTSTRAP_RESAMPLES", 2000)),
+                alpha=float(getattr(config, "PROMOTION_BOOTSTRAP_ALPHA", 0.05)),
+            )
+        )
+        report.outcomes.append(
+            gate_bootstrap_profit_factor(
+                rows,
+                min_pf_lower=getattr(config, "PROMOTION_BOOTSTRAP_MIN_PF_LOWER", None),
+                block_size=int(getattr(config, "PROMOTION_BOOTSTRAP_BLOCK_SIZE", 5)),
+                n_resamples=int(getattr(config, "PROMOTION_BOOTSTRAP_RESAMPLES", 2000)),
+                alpha=float(getattr(config, "PROMOTION_BOOTSTRAP_ALPHA", 0.05)),
+            )
+        )
+    elif bool(getattr(config, "PROMOTION_BOOTSTRAP_ENABLED", False)):
+        report.outcomes.append(
+            GateOutcome(
+                name="bootstrap_expectancy",
+                passed=False,
+                detail="skipped_floors_not_met",
+            )
+        )
+
     report.benchmark_note = bt_out.detail
     report.input_hash = build_input_hash(profile_id, tier, rows)
     return report

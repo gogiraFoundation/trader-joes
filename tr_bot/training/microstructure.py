@@ -33,17 +33,39 @@ def add_vwap_columns(
     return out
 
 
-def add_ohlcv_microstructure_proxies(df: pd.DataFrame) -> pd.DataFrame:
+def add_ohlcv_microstructure_proxies(
+    df: pd.DataFrame,
+    *,
+    group_cols: list[str] | None = None,
+) -> pd.DataFrame:
     """
     Without L2 data: bar range position, volume z-score momentum proxy, return velocity.
+
+    Return / rolling series are computed per ``source``/``asset`` when present so
+    multi-asset frames do not bleed across groups.
     """
     out = df.copy()
+    if group_cols is None:
+        group_cols = [c for c in ("source", "asset") if c in out.columns]
+
     hl = (out["high"] - out["low"]).replace(0, np.nan)
     out["bar_position"] = ((out["close"] - out["low"]) / hl).clip(0, 1)
     out["bar_range_pct"] = (hl / out["close"].replace(0, np.nan)) * 100.0
-    out["ret_1"] = out["close"].pct_change()
-    out["volatility_proxy"] = out["ret_1"].rolling(20, min_periods=5).std()
-    out["volume_velocity"] = out["volume"].pct_change()
+
+    if not group_cols:
+        out["ret_1"] = out["close"].pct_change()
+        out["volatility_proxy"] = out["ret_1"].rolling(20, min_periods=5).std()
+        out["volume_velocity"] = out["volume"].pct_change()
+        return out
+
+    sort_keys = list(group_cols)
+    if "timestamp" in out.columns:
+        sort_keys.append("timestamp")
+    out = out.sort_values(sort_keys, kind="mergesort")
+    g = out.groupby(group_cols, sort=False)
+    out["ret_1"] = g["close"].pct_change()
+    out["volatility_proxy"] = g["ret_1"].transform(lambda s: s.rolling(20, min_periods=5).std())
+    out["volume_velocity"] = g["volume"].pct_change()
     return out
 
 

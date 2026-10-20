@@ -32,3 +32,17 @@ def fetch_total_base_amount(symbol: str) -> float:
     if isinstance(b, dict):
         return float(b.get("total") or 0.0)
     return float(b or 0.0)
+
+
+def fetch_free_quote_amount(symbol: str) -> float:
+    """Free balance of the quote asset (e.g. USDT for BTC/USDT)."""
+    exchange = get_ccxt_exchange()
+    _, quote = split_pair(symbol)
+    exchange.load_markets()
+    bal = exchange.fetch_balance()
+    if quote not in bal:
+        return 0.0
+    q = bal[quote]
+    if isinstance(q, dict):
+        return float(q.get("free") or 0.0)
+    return float(q or 0.0)

@@ -19,7 +19,6 @@ def _utc_date_prefix(iso_utc: str) -> str | None:
 
 def build_daily_rollup_payload(artifacts_root: Path | None = None) -> dict:
     """Aggregate recent closed trades for the current UTC day (for dashboards / gates)."""
-    root = artifacts_root or Path(config.ARTIFACTS_DIR).resolve()
     today = datetime.now(timezone.utc).date().isoformat()
     trades = read_recent_trades(limit=50_000)
     day_rows = []

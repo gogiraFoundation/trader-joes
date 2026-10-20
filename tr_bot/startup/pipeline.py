@@ -19,6 +19,8 @@ from tr_bot.notifications import events as notify_events
 from tr_bot.notifications.facade import notify
 from tr_bot.promotion import log as promotion_log
 from tr_bot.strategy import deployment_io as dep
+from tr_bot.strategy.no_trade_adaptation import run_isolated_backtest_for_packaged_profile
+from tr_bot.strategy.profile import build_profile_document
 from tr_bot.startup.backtest_gate_thresholds import (
     DEFAULT_MAX_DRAWDOWN_PCT,
     DEFAULT_MIN_RETURN_PCT,
@@ -132,11 +134,81 @@ def _run_training_stage(python_exe: str) -> dict[str, Any]:
     return out
 
 
-def _register_profile_to_paper(profile_id: str) -> dict[str, Any]:
+def _load_profile_params(profile_id: str) -> dict[str, Any] | None:
     root = Path(config.ARTIFACTS_DIR).resolve()
+    p = dep.strategy_profile_path(root, profile_id)
+    raw = dep.read_json_file(p)
+    if not isinstance(raw, dict):
+        return None
+    params = raw.get("params")
+    return params if isinstance(params, dict) else None
+
+
+def _build_candidate_package(profile_id: str) -> dict[str, Any] | None:
+    """Build isolated-backtest package from an emitted sweep profile file."""
+    root = Path(config.ARTIFACTS_DIR).resolve()
+    raw = dep.read_json_file(dep.strategy_profile_path(root, profile_id))
+    if not isinstance(raw, dict):
+        return None
+    params = raw.get("params")
+    if not isinstance(params, dict):
+        return None
+    doc = build_profile_document(
+        profile_id,
+        params,
+        parent_profile_id=str(raw.get("parent_profile_id") or config.ACTIVE_STRATEGY_PROFILE_ID or "") or None,
+        hypothesis=str(raw.get("hypothesis") or f"Startup tuning candidate {profile_id}"),
+        source="startup_tuning",
+    )
     now = datetime.now(timezone.utc).isoformat()
-    ptr = {"profile_id": profile_id, "activated_at": now, "source": "startup_tuning"}
-    dep.atomic_write_json(dep.pointer_path(root, "paper"), ptr)
+    return {
+        "pointer": {"profile_id": profile_id, "activated_at": now, "source": "startup_tuning"},
+        "profile_body": doc,
+    }
+
+
+def _activate_candidate_after_gate(
+    profile_id: str,
+    *,
+    backtest_metrics: dict[str, Any],
+    gate: dict[str, Any],
+) -> dict[str, Any]:
+    """Commit profile + pointer only after backtest gate passes."""
+    root = Path(config.ARTIFACTS_DIR).resolve()
+    pkg = _build_candidate_package(profile_id)
+    if not pkg:
+        return {"ok": False, "reason": "candidate_profile_missing", "profile_id": profile_id}
+
+    if not gate.get("passed"):
+        now = datetime.now(timezone.utc).isoformat()
+        promotion_log.append_promotion_event(
+            root,
+            {
+                "action": "startup_candidate_rejected",
+                "utc": now,
+                "profile_id": profile_id,
+                "to_tier": "paper",
+                "passed": False,
+                "reason": "backtest_gate_failed",
+                "backtest": backtest_metrics,
+                "gate": gate,
+            },
+        )
+        return {
+            "ok": False,
+            "reason": "backtest_gate_failed",
+            "profile_id": profile_id,
+            "gate": gate,
+        }
+
+    result = dep.commit_candidate_profile(
+        root,
+        pkg["profile_body"],
+        tier="paper",
+        update_pointer=True,
+        pointer_source="startup_tuning",
+    )
+    now = datetime.now(timezone.utc).isoformat()
     promotion_log.append_promotion_event(
         root,
         {
@@ -144,10 +216,28 @@ def _register_profile_to_paper(profile_id: str) -> dict[str, Any]:
             "utc": now,
             "profile_id": profile_id,
             "to_tier": "paper",
-            "passed": True,
+            "passed": bool(result.get("ok")),
+            "config_hash": result.get("config_hash"),
+            "backtest": backtest_metrics,
+            "gate": gate,
         },
     )
-    return ptr
+    return result
+
+
+def _register_profile_to_paper(profile_id: str) -> dict[str, Any]:
+    """Deprecated direct register — kept for tests; prefer _activate_candidate_after_gate."""
+    root = Path(config.ARTIFACTS_DIR).resolve()
+    pkg = _build_candidate_package(profile_id)
+    if not pkg:
+        raise ValueError(f"profile not found: {profile_id}")
+    return dep.commit_candidate_profile(
+        root,
+        pkg["profile_body"],
+        tier="paper",
+        update_pointer=True,
+        pointer_source="startup_tuning",
+    )
 
 
 def _extract_profile_id(stdout: str, start_ts: float) -> str | None:
@@ -284,18 +374,57 @@ def run_startup_pipeline(python_exe: str) -> dict[str, Any]:
             timeout_s=tuning_timeout,
         )
         emitted_pid = _extract_profile_id(tune_cp.stdout, t0)
+        candidate_backtest: dict[str, Any] | None = None
+        candidate_gate: dict[str, Any] | None = None
         register_result: dict[str, Any] | None = None
         if tune_cp.returncode == 0 and emitted_pid:
-            try:
-                register_result = _register_profile_to_paper(emitted_pid)
-            except Exception as e:  # noqa: BLE001
-                register_result = {"error": str(e)}
+            pkg = _build_candidate_package(emitted_pid)
+            if pkg is None:
+                register_result = {"ok": False, "reason": "candidate_profile_missing"}
                 tune_cp = subprocess.CompletedProcess(
                     args=tune_cp.args,
                     returncode=1,
                     stdout=tune_cp.stdout,
-                    stderr=(tune_cp.stderr + f"\nregister_profile_failed:{e}"),
+                    stderr=(tune_cp.stderr + "\ncandidate_profile_missing"),
                 )
+            else:
+                timeout = _int_env("STARTUP_TUNING_BACKTEST_TIMEOUT_SECONDS", 600)
+                metrics, bt_err = run_isolated_backtest_for_packaged_profile(
+                    emitted_pid,
+                    pkg,
+                    timeout_s=timeout,
+                )
+                if metrics is None:
+                    register_result = {"ok": False, "reason": f"isolated_backtest_failed:{bt_err}"}
+                    candidate_backtest = {"error": bt_err}
+                    promotion_log.append_promotion_event(
+                        Path(config.ARTIFACTS_DIR).resolve(),
+                        {
+                            "action": "startup_candidate_rejected",
+                            "utc": datetime.now(timezone.utc).isoformat(),
+                            "profile_id": emitted_pid,
+                            "passed": False,
+                            "reason": f"isolated_backtest_failed:{bt_err}",
+                        },
+                    )
+                else:
+                    candidate_backtest = metrics
+                    candidate_gate = evaluate_backtest_gate(metrics)
+                    register_result = _activate_candidate_after_gate(
+                        emitted_pid,
+                        backtest_metrics=metrics,
+                        gate=candidate_gate,
+                    )
+                    if not register_result.get("ok"):
+                        tune_cp = subprocess.CompletedProcess(
+                            args=tune_cp.args,
+                            returncode=1,
+                            stdout=tune_cp.stdout,
+                            stderr=(
+                                tune_cp.stderr
+                                + f"\nstartup_candidate_activation_failed:{register_result.get('reason')}"
+                            ),
+                        )
         soft_timeout = (
             tune_cp.returncode == 124
             and _bool_env("STARTUP_TUNING_TIMEOUT_SOFT_FAIL", False)
@@ -310,6 +439,8 @@ def run_startup_pipeline(python_exe: str) -> dict[str, Any]:
             "soft_fail_skipped": soft_timeout,
             "emitted_profile_id": emitted_pid,
             "paper_pointer": register_result,
+            "candidate_backtest": candidate_backtest,
+            "candidate_backtest_gate": candidate_gate,
         }
         if isinstance(register_result, dict) and isinstance(register_result.get("profile_id"), str):
             out["stages"]["preflight"]["active_strategy_profile_id_after_tune"] = register_result[
@@ -325,6 +456,7 @@ def run_startup_pipeline(python_exe: str) -> dict[str, Any]:
     else:
         out["stages"]["tune"] = {"ok": True, "skipped": True}
 
+    # Post-tuning backtest on active profile (validation of running config)
     back_cp = _run_cmd([python_exe, "-m", "tr_bot.managers", "backtest-run", "--compact"])
     out["stages"]["backtest"] = {
         "ok": back_cp.returncode == 0,

@@ -9,7 +9,7 @@ from tr_bot import config
 from tr_bot.backtest.runner import run_backtest_on_dataframe
 from tr_bot.startup.backtest_gate_thresholds import DEFAULT_MAX_DRAWDOWN_PCT, DEFAULT_MIN_RETURN_PCT
 from tr_bot.logger import setup_logger
-from tr_bot.market_data import fetch_ohlcv
+from tr_bot.market_data import fetch_ohlcv_deep
 from tr_bot.regime import RegimeModel
 
 logger = setup_logger("tr_bot.training.backtest_gate")
@@ -26,7 +26,7 @@ def run_train_backtest_gate(regime: RegimeModel) -> dict[str, Any]:
         bars,
     )
     t0 = time.perf_counter()
-    df = fetch_ohlcv(symbol, tf, limit=bars)
+    df = fetch_ohlcv_deep(symbol, tf, limit=bars)
     elapsed_s = time.perf_counter() - t0
     logger.info(
         "Train backtest gate: fetch finished in %.1fs (%s rows)",

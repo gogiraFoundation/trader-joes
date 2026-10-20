@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
+from datetime import datetime, timezone
 from pathlib import Path
 from types import ModuleType
 from typing import Any
@@ -58,8 +61,21 @@ _OVERLAY_COERCERS: dict[str, tuple[str, Any]] = {
     "LIVE_FEE_STANDARD_TAKER_BPS": ("float", None),
     "LIVE_FEE_USE_BINANCE_RETAIL_TAKER_DEFAULTS": ("bool", None),
     "LIVE_SLIPPAGE_BPS": ("float", None),
+    "MIN_ATR_PCT": ("float", None),
+    "MAX_OPEN_POSITIONS": ("int", None),
+    "PAPER_MAX_NOTIONAL_USDT": ("float", None),
     "EXECUTION_STYLE": ("str_lower", None),
     "TWAP_DURATION_SECONDS": ("int", None),
+    "STRATEGY_ENGINE": ("str_lower", None),
+    "SMC_MIN_TRADE_SCORE": ("float", None),
+    "SMC_MIN_SMC_FACTORS": ("int", None),
+    "SMC_HTF_TIMEFRAME": ("str_strip", None),
+    "SMC_PRIMARY_TIMEFRAME": ("str_strip", None),
+    "SMC_ENTRY_TIMEFRAME": ("str_strip", None),
+    "SMC_EXEC_TIMEFRAME": ("str_strip", None),
+    "EXIT_MODE": ("str_lower", None),
+    "EXIT_POLICY": ("str_lower", None),
+    "BACKTEST_EXIT_POLICY": ("str_lower", None),
 }
 
 OVERLAY_PARAM_KEYS = frozenset(_OVERLAY_COERCERS.keys())
@@ -143,3 +159,114 @@ def apply_profile_overlay(config_module: ModuleType) -> str:
             logger.warning("Could not apply profile param %s=%r: %s", k, v, e)
 
     return profile_id
+
+
+def compute_config_hash(params: dict[str, Any]) -> str:
+    """SHA-256 over canonical whitelisted params (sorted keys)."""
+    canonical: dict[str, Any] = {}
+    for k in sorted(OVERLAY_PARAM_KEYS):
+        if k in params:
+            v = params[k]
+            if isinstance(v, bool):
+                canonical[k] = v
+            elif isinstance(v, float):
+                canonical[k] = round(v, 10)
+            else:
+                canonical[k] = v
+    payload = json.dumps(canonical, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def validate_candidate_profile(
+    doc: dict[str, Any],
+    *,
+    expected_profile_id: str | None = None,
+    require_config_hash: bool = False,
+) -> dict[str, Any]:
+    """
+    Validate profile JSON before write/promotion.
+    Returns {ok, errors, coerced_params, config_hash}.
+    """
+    errors: list[str] = []
+    profile_id = doc.get("profile_id")
+    if not profile_id or not isinstance(profile_id, str):
+        errors.append("missing profile_id")
+    elif expected_profile_id and profile_id != expected_profile_id:
+        errors.append(f"profile_id mismatch: {profile_id!r} != {expected_profile_id!r}")
+
+    ver = doc.get("schema_version", 1)
+    try:
+        if int(ver) != SCHEMA_VERSION:
+            errors.append(f"unsupported schema_version: {ver}")
+    except (TypeError, ValueError):
+        errors.append("invalid schema_version")
+
+    params = doc.get("params")
+    if not isinstance(params, dict):
+        errors.append("params must be a dict")
+        return {"ok": False, "errors": errors, "coerced_params": {}, "config_hash": ""}
+
+    coerced: dict[str, Any] = {}
+    for k, v in params.items():
+        if k not in _OVERLAY_COERCERS:
+            errors.append(f"unknown param: {k}")
+            continue
+        try:
+            coerced[k] = _coerce(k, v)
+        except (TypeError, ValueError) as e:
+            errors.append(f"invalid param {k}={v!r}: {e}")
+
+    if coerced.get("EXIT_MODE") and coerced["EXIT_MODE"] not in ("atr", "structural", "hybrid"):
+        errors.append(f"invalid EXIT_MODE: {coerced['EXIT_MODE']}")
+    if coerced.get("EXIT_POLICY") and coerced["EXIT_POLICY"] not in (
+        "software_polled",
+        "exchange_native",
+    ):
+        errors.append(f"invalid EXIT_POLICY: {coerced['EXIT_POLICY']}")
+    if coerced.get("BACKTEST_EXIT_POLICY") and coerced["BACKTEST_EXIT_POLICY"] not in (
+        "software_polled",
+        "exchange_native",
+    ):
+        errors.append(f"invalid BACKTEST_EXIT_POLICY: {coerced['BACKTEST_EXIT_POLICY']}")
+
+    config_hash = compute_config_hash(coerced)
+    stored_hash = doc.get("config_hash")
+    if require_config_hash and stored_hash and stored_hash != config_hash:
+        errors.append("config_hash mismatch (profile params tampered)")
+
+    return {
+        "ok": len(errors) == 0,
+        "errors": errors,
+        "coerced_params": coerced,
+        "config_hash": config_hash,
+    }
+
+
+def build_profile_document(
+    profile_id: str,
+    params: dict[str, Any],
+    *,
+    parent_profile_id: str | None = None,
+    hypothesis: str | None = None,
+    source: str = "candidate",
+) -> dict[str, Any]:
+    """Build a validated profile document with embedded config_hash."""
+    subset = {k: params[k] for k in OVERLAY_PARAM_KEYS if k in params}
+    config_hash = compute_config_hash(subset)
+    now = datetime.now(timezone.utc).isoformat()
+    return {
+        "profile_id": profile_id,
+        "schema_version": SCHEMA_VERSION,
+        "created_at": now,
+        "parent_profile_id": parent_profile_id,
+        "hypothesis": hypothesis or f"Profile {profile_id} ({source})",
+        "params": subset,
+        "config_hash": config_hash,
+        "source": source,
+    }
+
+
+def active_config_hash(config_module: ModuleType) -> str:
+    """Compute config hash from current effective overlay params on config module."""
+    params = {k: getattr(config_module, k) for k in OVERLAY_PARAM_KEYS if hasattr(config_module, k)}
+    return compute_config_hash(params)

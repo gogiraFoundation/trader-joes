@@ -1,0 +1,1850 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>tr_bot dashboard v2</title>
+  <script src="/dashboard/vendor/tailwindcdn.js"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            surface: { DEFAULT: '#0f1419', card: '#1a2332', border: '#2d3a4d' },
+            accent: { DEFAULT: '#38bdf8', muted: '#64748b' }
+          },
+          fontFamily: { sans: ['system-ui', 'sans-serif'] }
+        }
+      }
+    };
+  </script>
+  <link rel="stylesheet" href="/dashboard/dashboard.css" />
+  <script src="/dashboard/vendor/chart.umd.min.js"></script>
+  <script src="/dashboard/js/common.js"></script>
+  <script src="/dashboard/js/overview-core.js"></script>
+</head>
+<body class="bg-surface min-h-screen text-slate-100 font-sans antialiased">
+  <div id="auth-gate" class="hidden fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4">
+    <div class="bg-surface-card border border-surface-border rounded-xl p-6 max-w-md w-full shadow-xl">
+      <h2 class="text-lg font-semibold text-white mb-2">Dashboard token required</h2>
+      <p class="text-sm text-slate-400 mb-4">Set <code class="text-accent">DASHBOARD_TOKEN</code> in the server environment, then enter it here. Stored in session only.</p>
+      <input id="token-input" type="password" placeholder="Token" class="w-full rounded-lg bg-surface border border-surface-border px-3 py-2 text-sm mb-3 focus:outline-none focus:ring-2 focus:ring-accent" />
+      <button type="button" id="token-save" class="w-full rounded-lg bg-sky-600 hover:bg-sky-500 py-2 text-sm font-medium">Save &amp; reload</button>
+    </div>
+  </div>
+
+  <div id="dashboard-header"></div>
+
+  <div id="exposure-banner" class="border-b border-surface-border bg-slate-900/90 text-sm text-slate-300 px-4 py-2 text-center">
+    <span id="exposure-text" class="text-slate-400">Loading…</span>
+  </div>
+
+  <div id="alert-bar" class="hidden sticky top-0 z-40 border-b border-surface-border px-4 py-2 space-y-1"></div>
+  <div id="alert-details" class="hidden border-b border-surface-border bg-slate-900/95 px-4 py-3">
+    <div class="max-w-6xl mx-auto">
+      <div class="flex items-start justify-between gap-4">
+        <div>
+          <h2 id="alert-details-title" class="text-sm font-semibold text-white">Alert details</h2>
+          <p id="alert-details-body" class="mt-2 text-sm text-slate-300 leading-relaxed">—</p>
+        </div>
+        <button type="button" id="alert-details-close" class="modal-close" aria-label="Close alert details">&times;</button>
+      </div>
+      <div id="alert-details-links" class="mt-3 flex flex-wrap gap-3 text-xs"></div>
+    </div>
+  </div>
+
+  <div id="compare-modal" class="hidden fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4" role="dialog" aria-modal="true" aria-labelledby="compare-modal-title">
+    <div class="bg-surface-card border border-surface-border rounded-xl p-6 max-w-2xl w-full shadow-xl max-h-[85vh] overflow-y-auto">
+      <div class="flex items-start justify-between gap-4 mb-3">
+        <h2 id="compare-modal-title" class="text-lg font-semibold text-white">Legacy vs SMC compare</h2>
+        <button type="button" id="compare-modal-close" class="modal-close" aria-label="Close compare dialog">&times;</button>
+      </div>
+      <p id="compare-summary" class="text-sm text-slate-300 mb-3">—</p>
+      <p id="compare-go-no-go" class="text-sm mb-3">—</p>
+      <h3 class="text-xs font-medium uppercase tracking-wide text-slate-500 mb-1">Raw artifacts</h3>
+      <pre id="compare-json" class="text-xs text-slate-400 bg-surface/80 border border-surface-border rounded-lg p-3 overflow-x-auto whitespace-pre-wrap break-all">—</pre>
+    </div>
+  </div>
+
+  <div id="confirm-modal" class="hidden fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4" role="dialog" aria-modal="true" aria-labelledby="confirm-title">
+    <div class="bg-surface-card border border-surface-border rounded-xl p-6 max-w-md w-full shadow-xl">
+      <h2 id="confirm-title" class="text-lg font-semibold text-white mb-2">Confirm action</h2>
+      <p id="confirm-body" class="text-sm text-slate-300 mb-4">—</p>
+      <div class="flex justify-end gap-2">
+        <button type="button" id="confirm-cancel" class="rounded-lg bg-slate-700 hover:bg-slate-600 px-3 py-2 text-sm font-medium">Cancel</button>
+        <button type="button" id="confirm-ok" class="rounded-lg bg-sky-600 hover:bg-sky-500 px-3 py-2 text-sm font-medium">Confirm</button>
+      </div>
+    </div>
+  </div>
+
+  <main class="max-w-6xl mx-auto px-4 py-8 space-y-8">
+    <p id="error-banner" class="hidden rounded-lg border border-red-500/50 bg-red-950/40 px-4 py-3 text-sm text-red-200"></p>
+
+    <section id="quick-actions" class="hidden rounded-xl border border-surface-border bg-surface-card p-5 shadow-lg">
+      <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-3">
+        <div>
+          <h2 class="text-lg font-semibold text-white">Quick actions</h2>
+          <p class="text-xs text-slate-500 mt-1">Write actions are gated by <code class="text-slate-400">DASHBOARD_WRITES_ENABLED</code> and, if set, a write token.</p>
+        </div>
+        <p id="qa-job-status" class="text-xs text-slate-400 font-mono text-right">—</p>
+      </div>
+      <div class="flex flex-wrap gap-2">
+        <button type="button" id="qa-circuit-reset" class="qa-btn btn-danger rounded-lg disabled:opacity-50 disabled:cursor-not-allowed px-3 py-2 text-sm font-medium">Reset circuit breaker</button>
+        <button type="button" id="qa-trading-toggle" class="qa-btn btn-danger rounded-lg disabled:opacity-50 disabled:cursor-not-allowed px-3 py-2 text-sm font-medium">Pause trading</button>
+        <button type="button" id="qa-backtest-run" class="qa-btn rounded-lg bg-slate-700 hover:bg-slate-600 disabled:opacity-50 disabled:cursor-not-allowed px-3 py-2 text-sm font-medium">Force backtest</button>
+        <button type="button" id="qa-training-run" class="qa-btn rounded-lg bg-slate-700 hover:bg-slate-600 disabled:opacity-50 disabled:cursor-not-allowed px-3 py-2 text-sm font-medium">Force train</button>
+        <button type="button" id="qa-compare-run" class="qa-btn rounded-lg bg-slate-700 hover:bg-slate-600 disabled:opacity-50 disabled:cursor-not-allowed px-3 py-2 text-sm font-medium">Run legacy/SMC compare</button>
+      </div>
+      <p id="qa-error" class="hidden text-xs text-rose-300 mt-3"></p>
+    </section>
+
+    <p class="text-xs text-slate-500 -mt-4">
+      More: <a href="/dashboard/strategy.html" class="text-accent hover:underline">Strategy &amp; promotion</a>
+      · <a href="/dashboard/scheduler.html" class="text-accent hover:underline">Jobs &amp; training</a>
+      · <a href="/dashboard/metrics.html" class="text-accent hover:underline">Diagnostics</a>
+      · <a href="/dashboard/risk.html" class="text-accent hover:underline">Risk</a>
+    </p>
+
+    <section class="grid grid-cols-1 lg:grid-cols-12 gap-6" id="overview-hero">
+      <article class="lg:col-span-8 rounded-xl border border-surface-border bg-surface-card p-6 shadow-lg">
+        <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 mb-4">
+          <div>
+            <h2 class="text-lg font-semibold text-white">Equity / NAV</h2>
+            <p class="text-xs text-slate-500 mt-1">Outlier-filtered samples (same series as Diagnostics)</p>
+          </div>
+          <p id="val-nav" class="text-2xl font-semibold text-sky-300 tabular-nums">—</p>
+        </div>
+        <div class="relative w-full chart-tall">
+          <canvas id="chart-equity" class="w-full h-full"></canvas>
+          <p id="eq-spark-empty" class="absolute inset-0 flex items-center justify-center text-slate-500 text-sm hidden px-4 text-center bg-surface-card">No equity samples yet — run the trading bot with the same <code class="text-slate-400">ARTIFACTS_DIR</code> as this API.</p>
+        </div>
+        <p id="eq-outliers-note" class="hidden text-xs text-amber-200/90 mt-2 leading-relaxed" role="status"></p>
+        <p id="val-nav-updated" class="text-xs text-slate-500 mt-2">—</p>
+      </article>
+      <div class="lg:col-span-4 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-1 gap-4" id="ops-section">
+        <article class="rounded-xl border border-surface-border bg-surface-card p-5 shadow-lg">
+          <h3 class="text-xs font-medium uppercase tracking-wide text-slate-500">Last loop (UTC)</h3>
+          <p id="val-last-loop" class="mt-2 text-lg font-semibold text-white tabular-nums break-all">—</p>
+          <p id="val-heartbeat" class="mt-1 text-sm text-slate-300">—</p>
+          <p id="val-heartbeat-detail" class="text-xs text-slate-500 mt-1">—</p>
+        </article>
+        <article class="rounded-xl border border-surface-border bg-surface-card p-5 shadow-lg">
+          <h3 class="text-xs font-medium uppercase tracking-wide text-slate-500">Circuit breaker</h3>
+          <p id="val-circuit" class="mt-2 text-2xl font-semibold text-white tabular-nums">—</p>
+          <p id="val-circuit-trip" class="text-xs mt-1">—</p>
+        </article>
+        <article class="rounded-xl border border-surface-border bg-surface-card p-5 shadow-lg">
+          <h3 class="text-xs font-medium uppercase tracking-wide text-slate-500">Trading halt</h3>
+          <p id="val-halt" class="mt-2 text-lg font-semibold text-white">—</p>
+          <p id="val-halt-reason" class="text-xs text-slate-400 mt-1 line-clamp-2">—</p>
+        </article>
+        <article class="rounded-xl border border-surface-border bg-surface-card p-5 shadow-lg">
+          <h3 class="text-xs font-medium uppercase tracking-wide text-slate-500">Open positions</h3>
+          <p id="val-open-positions" class="mt-2 text-2xl font-semibold text-white tabular-nums">—</p>
+          <p id="val-dd" class="text-xs text-amber-400 mt-1">Drawdown: —</p>
+          <p id="val-peak" class="text-xs text-slate-500 mt-1">Peak: —</p>
+        </article>
+        <article class="rounded-xl border border-surface-border bg-surface-card p-5 shadow-lg sm:col-span-2 lg:col-span-1">
+          <h3 class="text-xs font-medium uppercase tracking-wide text-slate-500">Last error</h3>
+          <p id="val-last-err" class="mt-2 text-sm text-slate-300 line-clamp-4 font-mono">—</p>
+          <p id="val-last-err-time" class="text-xs text-slate-500 mt-1">—</p>
+        </article>
+      </div>
+    </section>
+
+    <section class="rounded-xl border border-surface-border bg-surface-card p-5 shadow-lg" aria-labelledby="se-heading">
+      <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+        <div>
+          <h3 id="se-heading" class="text-xs font-medium uppercase tracking-wide text-slate-500">Strategy engine</h3>
+          <p id="se-summary" class="mt-2 text-sm text-slate-300">—</p>
+        </div>
+        <div class="flex items-center gap-2 self-start">
+          <span id="se-shadow-pill" class="hidden px-3 py-1 rounded-full text-xs font-medium bg-slate-700 text-slate-300"></span>
+          <button type="button" id="se-compare-open" class="rounded-lg bg-slate-700 hover:bg-slate-600 px-3 py-1.5 text-xs font-medium min-h-[44px]">View compare</button>
+        </div>
+      </div>
+    </section>
+
+    <section class="rounded-xl border border-surface-border bg-surface-card p-6 shadow-lg" aria-labelledby="perf-heading">
+      <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 mb-4">
+        <div>
+          <h2 id="perf-heading" class="text-lg font-semibold text-white">Performance</h2>
+          <p class="text-xs text-slate-500 mt-1">Live realized closed trades vs historical backtest. Fee assumptions stay on the Backtest tab.</p>
+        </div>
+        <div class="flex items-center gap-2" role="tablist" aria-label="Performance mode">
+          <button type="button" id="perf-tab-live" class="rounded-lg bg-sky-700 text-white px-3 py-1.5 text-sm font-medium min-h-[44px]" aria-selected="true">Live</button>
+          <button type="button" id="perf-tab-backtest" class="rounded-lg bg-slate-700 hover:bg-slate-600 px-3 py-1.5 text-sm font-medium text-slate-100 min-h-[44px]" aria-selected="false">Backtest</button>
+        </div>
+      </div>
+
+      <div id="perf-panel-live" class="space-y-4">
+        <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-5 gap-4">
+          <article class="rounded-lg bg-surface/80 border border-surface-border px-4 py-3 xl:col-span-2">
+            <h3 class="text-xs font-medium uppercase tracking-wide text-slate-500">Closed-trade performance</h3>
+            <p id="live-closed-total" class="mt-2 text-lg font-semibold tabular-nums text-slate-200">—</p>
+            <p id="live-closed-meta" class="text-xs text-slate-500 mt-2 leading-relaxed">—</p>
+          </article>
+          <article class="rounded-lg bg-surface/80 border border-surface-border px-4 py-3">
+            <h3 class="text-xs font-medium uppercase tracking-wide text-slate-500">Average win / loss</h3>
+            <p id="live-avg-win-loss" class="mt-2 text-sm text-slate-300 leading-relaxed">—</p>
+          </article>
+          <article class="rounded-lg bg-surface/80 border border-surface-border px-4 py-3">
+            <h3 class="text-xs font-medium uppercase tracking-wide text-slate-500">Best / worst trade</h3>
+            <p id="live-best-worst" class="mt-2 text-sm text-slate-300 leading-relaxed">—</p>
+          </article>
+          <article class="rounded-lg bg-surface/80 border border-surface-border px-4 py-3">
+            <h3 class="text-xs font-medium uppercase tracking-wide text-slate-500">NAV vs baseline</h3>
+            <p id="perf-baseline-line" class="mt-2 text-lg font-semibold tabular-nums text-slate-200">—</p>
+            <p id="perf-baseline-hint" class="text-xs text-slate-500 mt-2 leading-relaxed">—</p>
+          </article>
+        </div>
+        <p id="live-curve-note" class="text-xs text-slate-500">Closed-trade statistics are realized only and exclude open-position unrealized P&amp;L.</p>
+      </div>
+
+      <div id="perf-panel-backtest" class="hidden space-y-4">
+        <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
+          <article class="rounded-lg bg-surface/80 border border-surface-border px-4 py-3">
+            <h3 class="text-xs font-medium uppercase tracking-wide text-slate-500">Return</h3>
+            <p id="perf-bt-return" class="mt-2 text-lg font-semibold tabular-nums text-slate-200">—</p>
+          </article>
+          <article class="rounded-lg bg-surface/80 border border-surface-border px-4 py-3">
+            <h3 class="text-xs font-medium uppercase tracking-wide text-slate-500">Max drawdown</h3>
+            <p id="perf-bt-drawdown" class="mt-2 text-lg font-semibold tabular-nums text-slate-200">—</p>
+          </article>
+          <article class="rounded-lg bg-surface/80 border border-surface-border px-4 py-3">
+            <h3 class="text-xs font-medium uppercase tracking-wide text-slate-500">Trades</h3>
+            <p id="perf-bt-trades" class="mt-2 text-sm text-slate-300 leading-relaxed">—</p>
+            <p id="perf-bt-sharpe" class="text-xs text-slate-500 mt-2">Sharpe: —</p>
+          </article>
+          <article class="rounded-lg bg-surface/80 border border-surface-border px-4 py-3">
+            <h3 class="text-xs font-medium uppercase tracking-wide text-slate-500">Compare engines</h3>
+            <button type="button" id="perf-compare-open" class="mt-2 rounded-lg bg-slate-700 hover:bg-slate-600 px-3 py-1.5 text-sm font-medium min-h-[44px]">Compare to SMC</button>
+            <p id="perf-bt-disclaimer" class="text-xs text-slate-500 mt-2 leading-relaxed">Historical simulation on past bars, not live performance.</p>
+          </article>
+        </div>
+        <p id="perf-cost-assumptions" class="text-xs text-slate-500 font-mono">Fee assumptions: —</p>
+        <p id="perf-bt-guardrails" class="text-xs text-amber-200/90 hidden" role="status"></p>
+      </div>
+    </section>
+
+    <section class="rounded-xl border border-surface-border bg-surface-card p-6 shadow-lg" id="pnl-section" aria-labelledby="trades-heading">
+      <div class="flex flex-col sm:flex-row sm:items-end sm:justify-between gap-3 mb-2">
+        <div>
+          <h2 id="trades-heading" class="text-lg font-semibold text-white">Closed trades</h2>
+          <p class="text-xs text-slate-500">Exit = take-profit vs stop (first touch); net P&amp;L is after fees.</p>
+        </div>
+        <button type="button" id="trades-export-csv" class="text-xs text-accent hover:underline self-start sm:self-end min-h-[44px]">Export CSV</button>
+      </div>
+      <div class="flex flex-wrap items-end gap-2 mb-3 text-xs">
+        <div>
+          <label for="trades-f-symbol" class="block text-slate-500 mb-1">Symbol</label>
+          <input id="trades-f-symbol" type="text" placeholder="BTC/USDT" class="w-32 rounded-lg bg-surface border border-surface-border px-2 py-1.5 text-slate-200 focus:outline-none focus:ring-2 focus:ring-accent min-h-[44px]" />
+        </div>
+        <div>
+          <label for="trades-f-side" class="block text-slate-500 mb-1">Side</label>
+          <select id="trades-f-side" class="rounded-lg bg-surface border border-surface-border px-2 py-1.5 text-slate-200 focus:outline-none focus:ring-2 focus:ring-accent min-h-[44px]">
+            <option value="">Any</option>
+            <option value="long">Long</option>
+            <option value="short">Short</option>
+          </select>
+        </div>
+        <div>
+          <label for="trades-f-outcome" class="block text-slate-500 mb-1">Outcome</label>
+          <select id="trades-f-outcome" class="rounded-lg bg-surface border border-surface-border px-2 py-1.5 text-slate-200 focus:outline-none focus:ring-2 focus:ring-accent min-h-[44px]">
+            <option value="">Any</option>
+            <option value="win">Win (TP)</option>
+            <option value="loss">Loss (stop)</option>
+          </select>
+        </div>
+        <div>
+          <label for="trades-f-from" class="block text-slate-500 mb-1">From (UTC)</label>
+          <input id="trades-f-from" type="date" class="rounded-lg bg-surface border border-surface-border px-2 py-1.5 text-slate-200 focus:outline-none focus:ring-2 focus:ring-accent min-h-[44px]" />
+        </div>
+        <div>
+          <label for="trades-f-to" class="block text-slate-500 mb-1">To (UTC)</label>
+          <input id="trades-f-to" type="date" class="rounded-lg bg-surface border border-surface-border px-2 py-1.5 text-slate-200 focus:outline-none focus:ring-2 focus:ring-accent min-h-[44px]" />
+        </div>
+        <button type="button" id="trades-f-apply" class="rounded-lg bg-sky-600 hover:bg-sky-500 px-3 py-1.5 font-medium min-h-[44px]">Apply filters</button>
+        <button type="button" id="trades-f-clear" class="rounded-lg bg-slate-700 hover:bg-slate-600 px-3 py-1.5 font-medium min-h-[44px]">Clear</button>
+      </div>
+      <p id="trades-summary" class="text-xs text-slate-500 mb-2">—</p>
+      <div class="overflow-x-auto">
+        <table class="w-full text-sm">
+          <thead>
+            <tr class="text-left text-slate-500 border-b border-surface-border">
+              <th class="pb-2 pr-3">Time (UTC)</th>
+              <th class="pb-2 pr-3">Symbol</th>
+              <th class="pb-2 pr-3">Side</th>
+              <th class="pb-2 pr-3" title="Take-profit hit before stop (not net P&amp;L sign)">Exit (TP/stop)</th>
+              <th class="pb-2 pr-3">Net P&amp;L</th>
+              <th class="pb-2 pr-3">Fee est.</th>
+              <th class="pb-2">Paper</th>
+            </tr>
+          </thead>
+          <tbody id="pnl-trades-body"></tbody>
+        </table>
+      </div>
+      <div class="flex items-center justify-between gap-3 mt-3 text-xs">
+        <button type="button" id="trades-prev" class="rounded-lg bg-slate-700 hover:bg-slate-600 disabled:opacity-40 disabled:cursor-not-allowed px-3 py-1.5 font-medium min-h-[44px]">&larr; Prev</button>
+        <span id="trades-page-info" class="text-slate-500">—</span>
+        <button type="button" id="trades-next" class="rounded-lg bg-slate-700 hover:bg-slate-600 disabled:opacity-40 disabled:cursor-not-allowed px-3 py-1.5 font-medium min-h-[44px]">Next &rarr;</button>
+      </div>
+    </section>
+
+    <section class="rounded-xl border border-surface-border bg-surface-card p-6 shadow-lg">
+      <div class="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-4 mb-4">
+        <div>
+          <h2 class="text-lg font-semibold text-white">Trading snapshot</h2>
+          <p class="text-xs text-slate-500 mt-1">Last completed loop (same fields as bot logs)</p>
+        </div>
+        <p id="trading-updated" class="text-xs text-slate-500 font-mono">—</p>
+      </div>
+      <p id="trading-note" class="hidden text-sm text-amber-200/90 mb-3"></p>
+      <p id="fund-log-line" class="text-sm font-mono text-sky-300/90 mb-4 break-all">—</p>
+      <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-4 text-sm">
+        <div class="rounded-lg bg-surface/80 border border-surface-border px-3 py-2">
+          <span class="text-slate-500 text-xs uppercase">Risk balance</span>
+          <p id="tr-risk-bal" class="text-white tabular-nums mt-1">—</p>
+        </div>
+        <div class="rounded-lg bg-surface/80 border border-surface-border px-3 py-2">
+          <span class="text-slate-500 text-xs uppercase">Trades today</span>
+          <p id="tr-risk-day" class="text-white tabular-nums mt-1">—</p>
+        </div>
+        <div class="rounded-lg bg-surface/80 border border-surface-border px-3 py-2">
+          <span class="text-slate-500 text-xs uppercase">Can trade</span>
+          <p id="tr-risk-can" class="text-white mt-1">—</p>
+        </div>
+      </div>
+      <div id="cmc-global-wrap" class="mb-4 rounded-lg border border-surface-border bg-surface/80 px-4 py-3 text-sm hidden">
+        <h3 class="text-xs font-medium uppercase tracking-wide text-slate-500 mb-1">CoinMarketCap global</h3>
+        <p id="cmc-global-line" class="text-slate-300 font-mono text-xs break-all leading-relaxed">—</p>
+      </div>
+      <div class="overflow-x-auto">
+        <table class="w-full text-sm">
+          <thead>
+            <tr class="text-left text-slate-500 border-b border-surface-border">
+              <th class="pb-2 pr-3">Symbol</th>
+              <th class="pb-2 pr-3">Action</th>
+              <th class="pb-2 pr-3">Regime</th>
+              <th class="pb-2 pr-3">Signal</th>
+              <th class="pb-2 pr-3">Sentiment</th>
+              <th class="pb-2 pr-3">Decision</th>
+              <th class="pb-2 pr-3">TA</th>
+              <th class="pb-2 pr-3">Fund.</th>
+              <th class="pb-2 pr-3">RSI</th>
+              <th class="pb-2">Close</th>
+            </tr>
+          </thead>
+          <tbody id="trading-body"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+      <article class="rounded-xl border border-surface-border bg-surface-card p-6 shadow-lg">
+        <h2 class="text-lg font-semibold text-white mb-4">Portfolio</h2>
+        <div class="overflow-x-auto">
+          <table class="w-full text-sm">
+            <thead>
+              <tr class="text-left text-slate-500 border-b border-surface-border">
+                <th class="pb-2 pr-4">Symbol</th>
+                <th class="pb-2">Weight</th>
+              </tr>
+            </thead>
+            <tbody id="portfolio-body"></tbody>
+          </table>
+        </div>
+      </article>
+      <article class="rounded-xl border border-surface-border bg-surface-card p-6 shadow-lg">
+        <h2 class="text-lg font-semibold text-white mb-4">Risk &amp; loop</h2>
+        <dl class="grid grid-cols-2 gap-x-4 gap-y-3 text-sm">
+          <dt class="text-slate-500">Risk / trade</dt><dd id="cfg-risk" class="text-white tabular-nums">—</dd>
+          <dt class="text-slate-500">Max trades / day</dt><dd id="cfg-max" class="text-white">—</dd>
+          <dt class="text-slate-500">Poll (s)</dt><dd id="cfg-poll" class="text-white">—</dd>
+          <dt class="text-slate-500">Circuit max</dt><dd id="cfg-cmax" class="text-white">—</dd>
+        </dl>
+      </article>
+    </section>
+
+    <footer class="flex flex-wrap gap-4 text-sm text-slate-500 border-t border-surface-border pt-8">
+      <a href="/docs" class="text-accent hover:underline">OpenAPI docs</a>
+      <a href="/ready" class="text-accent hover:underline">/ready JSON</a>
+      <span id="refresh-note" class="text-slate-600">Auto-refresh every 20s</span>
+    </footer>
+  </main>
+
+  <script>
+    const $ = TRDashboard.$;
+
+    function pill(el, ok, label) {
+      if (!el) return;
+      el.textContent = label;
+      // Preserve dash-pill min hit target from shared header chrome.
+      el.className =
+        'dash-pill ' +
+        (ok ? 'bg-emerald-900/60 text-emerald-300' : 'bg-rose-900/60 text-rose-300');
+    }
+
+    function fmtPct(x) {
+      if (x == null || Number.isNaN(x)) return '—';
+      return (100 * x).toFixed(2) + '%';
+    }
+
+    function fmtNum(x) {
+      if (x == null || x === '') return '—';
+      const n = Number(x);
+      return Number.isFinite(n) ? n.toLocaleString(undefined, { maximumFractionDigits: 4 }) : String(x);
+    }
+
+    function truncPath(s, maxLen) {
+      if (s == null || s === '') return '—';
+      const t = String(s);
+      if (t.length <= maxLen) return t;
+      return '…' + t.slice(-(maxLen - 1));
+    }
+
+    function renderBacktestScheduler(bt, sch) {
+      bt = bt || {};
+      sch = sch || {};
+      const lr = bt.last_run;
+      const bcfg = bt.config || {};
+      const pill = $('bt-pill');
+      if (pill) {
+        if (!lr) {
+          pill.textContent = 'No backtest_last_run.json';
+          pill.className = 'px-3 py-1 rounded-full text-xs font-medium bg-slate-700 text-slate-300 self-start';
+        } else if (lr.ok === true) {
+          pill.textContent = 'Last backtest: OK';
+          pill.className = 'px-3 py-1 rounded-full text-xs font-medium bg-emerald-900/60 text-emerald-300 self-start';
+        } else {
+          pill.textContent = 'Last backtest: failed';
+          pill.className = 'px-3 py-1 rounded-full text-xs font-medium bg-rose-900/60 text-rose-300 self-start';
+        }
+      }
+      const bf = $('bt-finished');
+      if (bf) bf.textContent = lr && lr.finished_utc ? fmtUtc(lr.finished_utc) : '—';
+      const br = $('bt-ret');
+      if (br) {
+        const v = lr && lr.total_return_pct != null ? Number(lr.total_return_pct) : null;
+        if (v != null && Number.isFinite(v)) {
+          br.textContent = v.toFixed(2) + '%';
+          br.className =
+            'tabular-nums mt-1 text-lg ' + (v >= 0 ? 'text-emerald-400' : 'text-rose-300');
+        } else {
+          br.textContent = '—';
+          br.className = 'text-slate-300 tabular-nums mt-1 text-lg';
+        }
+      }
+      const bd = $('bt-dd');
+      if (bd) bd.textContent = lr && lr.max_drawdown_pct != null ? (Number(lr.max_drawdown_pct).toFixed(2) + '%') : '—';
+      const btTr = $('bt-trades');
+      if (btTr) {
+        if (lr && lr.trades != null) {
+          const w = lr.wins != null ? lr.wins : '—';
+          const l = lr.losses != null ? lr.losses : '—';
+          btTr.textContent = lr.trades + ' total · ' + w + ' W / ' + l + ' L';
+        } else btTr.textContent = '—';
+      }
+      const be = $('bt-err');
+      if (be) {
+        if (lr && lr.error) {
+          be.textContent = lr.error;
+          be.classList.remove('hidden');
+        } else {
+          be.textContent = '';
+          be.classList.add('hidden');
+        }
+      }
+      const bm = $('bt-meta');
+      if (bm) {
+        const sym = lr && lr.symbol ? lr.symbol : '—';
+        const tf = lr && lr.timeframe ? lr.timeframe : '—';
+        const bars = lr && lr.bars_total != null ? lr.bars_total : '—';
+        const bb = bcfg.backtest_bars != null ? bcfg.backtest_bars : '—';
+        bm.textContent = sym + ' · ' + tf + ' · bars=' + bars + ' · BACKTEST_BARS=' + bb;
+      }
+      const sh = $('sched-hint');
+      if (sh) {
+        const ti = sch.training_interval_seconds != null ? sch.training_interval_seconds : 0;
+        const bi = sch.backtest_interval_seconds != null ? sch.backtest_interval_seconds : 0;
+        const en = sch.enabled === true;
+        sh.textContent = 'Run: ./start.sh --scheduler or python -m tr_bot.scheduler. ' +
+          'enabled=' + en + ' · train_every=' + ti + 's · backtest_every=' + bi + 's · tick=' +
+          (sch.tick_seconds != null ? sch.tick_seconds : '—') + 's · on_start train=' +
+          (sch.run_training_on_start === true) + ' backtest=' + (sch.run_backtest_on_start === true);
+      }
+    }
+
+    function renderTraining(t) {
+      t = t || {};
+      const tCfg = t.config || {};
+      const ds = t.dataset || {};
+      const models = t.models || {};
+      const trn = models.train_output || {};
+      const lr = t.last_run;
+
+      const pill = $('train-last-pill');
+      if (pill) {
+        if (!lr) {
+          pill.textContent = 'No last_run.json';
+          pill.className = 'px-3 py-1 rounded-full text-xs font-medium bg-slate-700 text-slate-300 self-start';
+        } else if (lr.ok === true) {
+          pill.textContent = 'Last run: OK';
+          pill.className = 'px-3 py-1 rounded-full text-xs font-medium bg-emerald-900/60 text-emerald-300 self-start';
+        } else {
+          pill.textContent = 'Last run: failed';
+          pill.className = 'px-3 py-1 rounded-full text-xs font-medium bg-rose-900/60 text-rose-300 self-start';
+        }
+      }
+
+      const fin = $('train-finished');
+      if (fin) fin.textContent = lr && lr.finished_utc ? fmtUtc(lr.finished_utc) : '—';
+      const trw = $('train-rows');
+      if (trw) trw.textContent = lr && lr.feature_rows != null ? ('Feature rows: ' + fmtNum(lr.feature_rows)) : 'Feature rows: —';
+      const stg = $('train-stage');
+      if (stg) stg.textContent = lr && lr.stage ? ('Stage: ' + lr.stage) : 'Stage: —';
+      const te = $('train-err');
+      if (te) {
+        if (lr && lr.error) {
+          te.textContent = lr.error;
+          te.classList.remove('hidden');
+        } else {
+          te.textContent = '';
+          te.classList.add('hidden');
+        }
+      }
+      const ta = $('train-artifact');
+      if (ta) ta.textContent = lr && lr.artifact ? truncPath(lr.artifact, 72) : '—';
+      const tv = $('train-version');
+      if (tv) {
+        if (lr && lr.version) {
+          tv.textContent = 'Versioned: ' + truncPath(lr.version, 64);
+          tv.classList.remove('hidden');
+        } else {
+          tv.textContent = '';
+          tv.classList.add('hidden');
+        }
+      }
+      const tp = $('train-promoted');
+      if (tp) {
+        if (lr && lr.promoted_to) {
+          tp.textContent = 'Promoted: ' + truncPath(lr.promoted_to, 64);
+          tp.classList.remove('hidden');
+        } else {
+          tp.textContent = '';
+          tp.classList.add('hidden');
+        }
+      }
+
+      const man = ds.manifest;
+      const tlh = $('train-last-hint');
+      if (tlh) {
+        if (!lr && man && man.created_utc) {
+          tlh.textContent = 'No record yet: run python -m tr_bot.training (or a manager training job) to write artifacts/training/last_run.json.';
+          tlh.classList.remove('hidden');
+        } else {
+          tlh.textContent = '';
+          tlh.classList.add('hidden');
+        }
+      }
+      const tdc = $('train-ds-created');
+      if (tdc) {
+        tdc.textContent = man && man.created_utc
+          ? ('Created ' + fmtUtc(man.created_utc))
+          : (ds.manifest_error ? ('Manifest error: ' + ds.manifest_error) : 'No manifest yet');
+      }
+      const tdr = $('train-ds-rows');
+      if (tdr) tdr.textContent = man && man.rows != null ? ('Manifest rows: ' + fmtNum(man.rows)) : 'Manifest rows: —';
+      const tds = $('train-ds-sources');
+      if (tds) tds.textContent = 'Sources: ' + (man && man.train_sources != null ? man.train_sources : '—');
+      const tdsh = $('train-ds-sha');
+      if (tdsh) {
+        const sh = man && man.sha256 ? String(man.sha256) : '';
+        tdsh.textContent = sh ? ('SHA256: ' + sh.slice(0, 12) + '…') : 'SHA256: —';
+      }
+      const tdp = $('train-ds-parquet');
+      if (tdp) {
+        if (ds.parquet_exists) {
+          const sz = ds.parquet_size_bytes != null ? (ds.parquet_size_bytes / 1024).toFixed(1) + ' KiB' : '';
+          tdp.textContent = 'Parquet: present' + (sz ? (' · ' + sz) : '') + (ds.parquet_mtime_utc ? (' · mtime ' + fmtUtc(ds.parquet_mtime_utc)) : '');
+        } else {
+          tdp.textContent = 'Parquet: missing';
+        }
+      }
+
+      const ver = models.versioned || [];
+      const tvl = $('train-ver-latest');
+      if (tvl) {
+        if (ver.length && ver[0]) {
+          const v0 = ver[0];
+          tvl.textContent = (v0.name || '—') + (v0.mtime_utc ? (' · ' + fmtUtc(v0.mtime_utc)) : '');
+        } else {
+          tvl.textContent = 'No versioned regime_*.joblib yet';
+        }
+      }
+      const tvh = $('train-ver-hint');
+      if (tvh) {
+        if (!ver.length) {
+          tvh.textContent = 'Timestamped copies live under models/ only when run_training_job runs (not plain CLI training).';
+          tvh.classList.remove('hidden');
+        } else {
+          tvh.textContent = '';
+          tvh.classList.add('hidden');
+        }
+      }
+      const tpr = $('train-prod');
+      if (tpr) {
+        const pr = models.production || {};
+        if (!pr.configured) {
+          tpr.textContent = 'Production: REGIME_MODEL_PATH not set — optional; set to your promoted .joblib path';
+        } else if (pr.exists) {
+          tpr.textContent = 'Production: present · ' + fmtUtc(pr.mtime_utc);
+        } else if (trn.exists) {
+          tpr.textContent = 'Production: REGIME_MODEL_PATH points to a missing file · ' + truncPath(pr.path || '', 52) + ' (train output file exists separately)';
+        } else {
+          tpr.textContent = 'Production: not on disk · ' + truncPath(pr.path || '', 52);
+        }
+      }
+      const tod = $('train-out-default');
+      if (tod) {
+        tod.textContent = trn.exists
+          ? ('Train output: OK · ' + truncPath(trn.path || '', 48))
+          : ('Train output: missing · ' + truncPath(trn.path || tCfg.train_output_path || '', 48));
+      }
+
+      const cs = $('train-cfg-sources');
+      if (cs) cs.textContent = tCfg.train_sources != null ? tCfg.train_sources : '—';
+      const cm = $('train-cfg-mode');
+      if (cm) cm.textContent = tCfg.train_dataset_mode != null ? tCfg.train_dataset_mode : '—';
+      const cmin = $('train-cfg-min');
+      if (cmin) cmin.textContent = tCfg.min_train_rows_validate != null ? String(tCfg.min_train_rows_validate) : '—';
+    }
+
+    function renderTrading(tr) {
+      tr = tr || {};
+      const tu = $('trading-updated');
+      if (tu) tu.textContent = tr.updated_utc ? ('Updated ' + fmtUtc(tr.updated_utc)) : 'No trading_snapshot.json yet';
+      const note = $('trading-note');
+      if (note) {
+        if (tr.note) {
+          note.textContent = 'Note: ' + tr.note;
+          note.classList.remove('hidden');
+        } else {
+          note.textContent = '';
+          note.classList.add('hidden');
+        }
+      }
+      const fl = $('fund-log-line');
+      const fd = tr.fund;
+      if (fl) {
+        if (fd && fd.line) fl.textContent = fd.line;
+        else if (fd && fd.last_nav != null) {
+          fl.textContent = 'NAV ' + fmtNum(fd.last_nav) + ' · peak ' + fmtNum(fd.peak_nav) + ' · dd ' + (fd.drawdown_pct != null ? fmtPct(fd.drawdown_pct) : '—');
+        } else {
+          fl.textContent = '— (Fund line appears when MANAGERS_ENABLED and fund state exists)';
+        }
+      }
+      const rk = tr.risk || {};
+      const rb = $('tr-risk-bal');
+      if (rb) rb.textContent = rk.balance != null ? fmtNum(rk.balance) : '—';
+      const rd = $('tr-risk-day');
+      if (rd) rd.textContent = (rk.daily_trades != null && rk.max_daily_trades != null) ? (rk.daily_trades + ' / ' + rk.max_daily_trades) : '—';
+      const rc = $('tr-risk-can');
+      if (rc) {
+        rc.textContent = rk.can_trade === true ? 'Yes' : rk.can_trade === false ? 'No' : '—';
+        rc.className = 'mt-1 ' + (rk.can_trade === true ? 'text-emerald-400' : rk.can_trade === false ? 'text-rose-400' : 'text-slate-400');
+      }
+      const cw = $('cmc-global-wrap');
+      const cl = $('cmc-global-line');
+      const cg = tr.cmc_global;
+      if (cw && cl) {
+        if (cg && cg.ok && cg.data) {
+          cw.classList.remove('hidden');
+          const d = cg.data;
+          const parts = [];
+          if (d.btc_dominance != null) parts.push('BTC dom ' + fmtNum(d.btc_dominance) + '%');
+          if (d.eth_dominance != null) parts.push('ETH dom ' + fmtNum(d.eth_dominance) + '%');
+          if (d.total_market_cap != null) parts.push('Mcap ' + fmtNum(d.total_market_cap));
+          if (d.total_volume_24h != null) parts.push('Vol 24h ' + fmtNum(d.total_volume_24h));
+          let line = parts.length ? parts.join(' · ') : '—';
+          if (cg.fetched_utc) line += ' · fetched ' + fmtUtc(cg.fetched_utc);
+          if (cg.ttl_s != null) line += ' · cache TTL ' + cg.ttl_s + 's';
+          cl.textContent = line;
+        } else if (cg && cg.ok === false) {
+          cw.classList.remove('hidden');
+          cl.textContent = 'Unavailable: ' + (cg.error || '—') + (cg.ttl_s != null ? ' · TTL ' + cg.ttl_s + 's' : '');
+        } else {
+          cw.classList.add('hidden');
+          cl.textContent = '—';
+        }
+      }
+      const tb = $('trading-body');
+      if (!tb) return;
+      tb.innerHTML = '';
+      const by = tr.by_symbol || {};
+      const keys = Object.keys(by).sort();
+      if (!keys.length) {
+        const tr0 = document.createElement('tr');
+        tr0.innerHTML = '<td colspan="10" class="py-4 text-slate-500">No symbol rows — the trading process has not written <code class="text-slate-400">trading_snapshot.json</code> under <code class="text-slate-400">ARTIFACTS_DIR</code> yet.</td>';
+        tb.appendChild(tr0);
+        return;
+      }
+      keys.forEach((sym) => {
+        const row = by[sym];
+        const trEl = document.createElement('tr');
+        trEl.className = 'border-b border-surface-border/50';
+        if (row.skipped) {
+          trEl.innerHTML = '<td class="py-2 pr-3 font-mono text-slate-200">' + sym + '</td><td class="py-2 text-amber-400" colspan="9">skipped: ' + (row.reason || '—') + '</td>';
+        } else if (row.holding) {
+          trEl.innerHTML = '<td class="py-2 pr-3 font-mono text-slate-200">' + sym + '</td><td class="py-2 text-sky-400" colspan="9">Position open (holding)</td>';
+        } else {
+          const act = row.action || '—';
+          const regime = row.regime != null ? row.regime : '—';
+          const sig = row.signal != null ? row.signal : '—';
+          const sent = row.sentiment != null ? row.sentiment : '—';
+          const dec = row.decision != null ? row.decision : '—';
+          const taok = row.ta_ok === true ? 'true' : row.ta_ok === false ? 'false' : '—';
+          const fk = row.fundamentals_ok === true ? 'true' : row.fundamentals_ok === false ? 'false' : '—';
+          const rsi = fmtNum(row.rsi);
+          const cl = fmtNum(row.close);
+          const extra = (row.reason ? ' · ' + row.reason : '') + (row.size != null ? ' · size ' + fmtNum(row.size) : '');
+          trEl.innerHTML = '<td class="py-2 pr-3 font-mono text-slate-200">' + sym + '</td><td class="py-2 pr-3 text-slate-300">' + act + extra + '</td><td class="py-2 pr-3">' + regime + '</td><td class="py-2 pr-3">' + sig + '</td><td class="py-2 pr-3">' + sent + '</td><td class="py-2 pr-3">' + dec + '</td><td class="py-2 pr-3">' + taok + '</td><td class="py-2 pr-3">' + fk + '</td><td class="py-2 pr-3 tabular-nums">' + rsi + '</td><td class="py-2 tabular-nums">' + cl + '</td>';
+        }
+        tb.appendChild(trEl);
+      });
+    }
+
+    const fmtUtc = TRDashboard.fmtUtc;
+
+    let equityChart = null;
+    function equityChartInstance() {
+      if (equityChart || typeof Chart === 'undefined') return equityChart;
+      const el = $('chart-equity');
+      if (!el) return null;
+      equityChart = new Chart(el.getContext('2d'), {
+        type: 'line',
+        data: {
+          datasets: [
+            {
+              label: 'NAV',
+              data: [],
+              borderColor: '#38bdf8',
+              backgroundColor: 'rgba(56, 189, 248, 0.15)',
+              tension: 0.15,
+              fill: true,
+            },
+          ],
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          animation: false,
+          parsing: false,
+          normalized: true,
+          scales: {
+            x: {
+              type: 'linear',
+              ticks: { color: '#94a3b8', callback: (v) => fmtUtc(Number(v)).slice(11, 16) },
+              grid: { color: 'rgba(148, 163, 184, 0.12)' },
+            },
+            y: {
+              ticks: { color: '#94a3b8' },
+              grid: { color: 'rgba(148, 163, 184, 0.12)' },
+            },
+          },
+          plugins: {
+            legend: { display: false },
+            tooltip: {
+              mode: 'index',
+              intersect: false,
+              callbacks: {
+                title: (items) => (items && items.length ? fmtUtc(Number(items[0].parsed.x)) : ''),
+                label: (item) => 'NAV ' + Number(item.parsed.y).toLocaleString(undefined, { maximumFractionDigits: 2 }),
+              },
+            },
+          },
+          interaction: { mode: 'index', intersect: false },
+          elements: { point: { radius: 0, hoverRadius: 4 } },
+        },
+      });
+      return equityChart;
+    }
+
+    function renderSparkline(points) {
+      const empty = $('eq-spark-empty');
+      const canvas = $('chart-equity');
+      if (!empty || !canvas) return;
+      const rows = (points || [])
+        .map((p) => ({ x: parseIsoMs(p.t), y: Number(p.nav) }))
+        .filter((r) => Number.isFinite(r.x) && Number.isFinite(r.y));
+      if (!rows.length) {
+        empty.classList.remove('hidden');
+        canvas.classList.add('invisible');
+        return;
+      }
+      empty.classList.add('hidden');
+      canvas.classList.remove('invisible');
+      const chart = equityChartInstance();
+      if (!chart) return;
+      chart.data.datasets[0].data = rows;
+      chart.update();
+    }
+
+    function parseIsoMs(iso) {
+      if (iso == null || iso === '') return NaN;
+      try {
+        const s = String(iso);
+        const d = new Date(s.includes('T') && !s.endsWith('Z') && !s.includes('+') ? s + 'Z' : s);
+        return d.getTime();
+      } catch (e) {
+        return NaN;
+      }
+    }
+
+    function fmtSignedPnl(n, quote) {
+      const q = quote || 'USDT';
+      if (n == null || !Number.isFinite(n)) return '—';
+      const abs = Math.abs(n);
+      const formatted = abs.toLocaleString(undefined, { maximumFractionDigits: 2 });
+      const sign = n >= 0 ? '+' : '−';
+      return sign + formatted + ' ' + q;
+    }
+
+    function pnlTextClass(n) {
+      if (n == null || !Number.isFinite(n)) return 'text-slate-200';
+      return n >= 0 ? 'text-emerald-400' : 'text-rose-300';
+    }
+
+    function showPerformanceTab(tab) {
+      TRDashboard.setTabPanels(
+        { live: $('perf-tab-live'), backtest: $('perf-tab-backtest') },
+        { live: $('perf-panel-live'), backtest: $('perf-panel-backtest') },
+        tab !== 'backtest' ? 'live' : 'backtest'
+      );
+    }
+
+    function renderPerformance(data) {
+      const cfg = data.config || {};
+      const quote = cfg.fund_quote_asset || 'USDT';
+      const pnlPayload = data.pnl || {};
+      const closed = pnlPayload.closed_trade_stats || {};
+      const baseline = pnlPayload.vs_initial || {};
+      const Core = window.TROverviewCore || {};
+      const live = Core.livePerformanceHeadline
+        ? Core.livePerformanceHeadline(closed, {
+            nav: baseline.ok ? baseline.last_nav_usdt : null,
+            baseline_usdt: baseline.ok ? baseline.initial_usdt : null,
+          })
+        : null;
+      const bl = $('perf-baseline-line');
+      const bh = $('perf-baseline-hint');
+      if (bl && bh) {
+        if (baseline.ok) {
+          const pnl = Number(baseline.delta_usdt);
+          const pct = baseline.return_pct != null ? Number(baseline.return_pct) / 100 : null;
+          bl.textContent = fmtSignedPnl(pnl, quote) + ' · ' + fmtPct(pct);
+          bl.className = 'mt-2 text-lg font-semibold tabular-nums ' + pnlTextClass(pnl);
+          bh.textContent =
+            'Baseline comparison only: current NAV vs initial configured equity (' +
+            (baseline.mode || '—') +
+            ').';
+        } else {
+          bl.textContent = '—';
+          bl.className = 'mt-2 text-lg font-semibold tabular-nums text-slate-200';
+          bh.textContent = baseline.note || 'No baseline comparison available.';
+        }
+      }
+
+      const total = $('live-closed-total');
+      const meta = $('live-closed-meta');
+      const avg = $('live-avg-win-loss');
+      const bw = $('live-best-worst');
+      const sumNet = live ? live.sum_net_pnl_usdt : closed.sum_net_pnl_usdt;
+      const winRate = live ? live.win_rate_pct : closed.win_rate_pct;
+      if (total) {
+        total.textContent =
+          (sumNet != null ? fmtSignedPnl(Number(sumNet), quote) : '—') +
+          ' · ' +
+          (winRate != null ? Number(winRate).toFixed(1) + '% win rate' : '— win rate');
+        total.className = 'mt-2 text-lg font-semibold tabular-nums ' + pnlTextClass(Number(sumNet));
+      }
+      if (meta) {
+        const ct = live ? live.closed_trades : closed.closed_trades;
+        meta.textContent =
+          (ct != null ? ct + ' closed trades' : '—') +
+          ' · ' +
+          (live && live.wins != null ? live.wins + ' W / ' + live.losses + ' L' : '—') +
+          ' · scope ' +
+          ((live && live.scope) || closed.scope || '—');
+      }
+      if (avg) {
+        const aw = live ? live.avg_win_usdt : closed.avg_win_usdt;
+        const al = live ? live.avg_loss_usdt : closed.avg_loss_usdt;
+        avg.textContent =
+          'Avg win ' + (aw != null ? fmtSignedPnl(Number(aw), quote) : '—') +
+          ' · Avg loss ' + (al != null ? fmtSignedPnl(Number(al), quote) : '—');
+      }
+      if (bw) {
+        const best = live ? live.best_trade_usdt : closed.best_trade_usdt;
+        const worst = live ? live.worst_trade_usdt : closed.worst_trade_usdt;
+        bw.textContent =
+          'Best ' + (best != null ? fmtSignedPnl(Number(best), quote) : '—') +
+          ' · Worst ' + (worst != null ? fmtSignedPnl(Number(worst), quote) : '—');
+      }
+
+      const bt = data.backtest || {};
+      const lr = bt.last_run || null;
+      const costs = (pnlPayload.cost_assumptions) || {};
+      const costKeys = {
+        LIVE_FEE_BPS: costs.live_fee_bps,
+        LIVE_SLIPPAGE_BPS: costs.live_slippage_bps,
+        BACKTEST_FEE_BPS: costs.backtest_fee_bps,
+        BACKTEST_SLIPPAGE_BPS: costs.backtest_slippage_bps,
+      };
+      const btHead = Core.backtestPerformanceHeadline
+        ? Core.backtestPerformanceHeadline(lr && lr.ok === true ? lr : {}, costKeys)
+        : null;
+      const btRet = $('perf-bt-return');
+      const btDd = $('perf-bt-drawdown');
+      const btTrades = $('perf-bt-trades');
+      const btSharpe = $('perf-bt-sharpe');
+      const costEl = $('perf-cost-assumptions');
+      const guardEl = $('perf-bt-guardrails');
+      if (btRet && btDd && btTrades) {
+        if (!lr) {
+          btRet.textContent = '—';
+          btDd.textContent = '—';
+          btTrades.textContent = 'No backtest_last_run.json yet.';
+          if (btSharpe) btSharpe.textContent = 'Sharpe: —';
+        } else if (lr.ok !== true) {
+          btRet.textContent = '—';
+          btDd.textContent = '—';
+          btTrades.textContent = (lr.error && String(lr.error)) || 'Last backtest did not complete successfully.';
+          if (btSharpe) btSharpe.textContent = 'Sharpe: —';
+        } else {
+          const tr = btHead && btHead.total_return_pct != null ? btHead.total_return_pct : Number(lr.total_return_pct);
+          const dd = btHead && btHead.max_drawdown_pct != null ? btHead.max_drawdown_pct : Number(lr.max_drawdown_pct);
+          btRet.textContent = Number.isFinite(tr) ? tr.toFixed(2) + '%' : '—';
+          btRet.className = 'mt-2 text-lg font-semibold tabular-nums ' + pnlTextClass(tr);
+          btDd.textContent = Number.isFinite(dd) ? dd.toFixed(2) + '%' : '—';
+          btDd.className = 'mt-2 text-lg font-semibold tabular-nums ' + pnlTextClass(-dd);
+          btTrades.textContent =
+            (lr.trades != null ? lr.trades + ' trades' : '—') +
+            ' · ' +
+            (lr.wins != null ? lr.wins : '—') +
+            ' W / ' +
+            (lr.losses != null ? lr.losses : '—') +
+            ' L';
+          if (btSharpe) {
+            if (btHead && btHead.risk_metrics_published && btHead.sharpe != null) {
+              btSharpe.textContent = 'Sharpe: ' + btHead.sharpe + (btHead.sortino != null ? ' · Sortino: ' + btHead.sortino : '');
+            } else {
+              btSharpe.textContent = 'Sharpe: unpublished (insufficient observations)';
+            }
+          }
+        }
+      }
+      if (costEl) {
+        costEl.textContent =
+          'Fee assumptions: LIVE fee ' +
+          (costs.live_fee_bps != null ? costs.live_fee_bps : '—') +
+          ' bps · slip ' +
+          (costs.live_slippage_bps != null ? costs.live_slippage_bps : '—') +
+          ' · BT fee ' +
+          (costs.backtest_fee_bps != null ? costs.backtest_fee_bps : '—') +
+          ' · slip ' +
+          (costs.backtest_slippage_bps != null ? costs.backtest_slippage_bps : '—');
+      }
+      if (guardEl) {
+        const g = (btHead && btHead.comparison_guardrails) || [];
+        if (g.length) {
+          guardEl.textContent = g.join(' · ');
+          guardEl.classList.remove('hidden');
+        } else {
+          guardEl.textContent = '';
+          guardEl.classList.add('hidden');
+        }
+      }
+    }
+
+    function renderPnl(pnl) {
+      pnl = pnl || {};
+      const disc = $('pnl-disclaimer');
+      if (disc) disc.textContent = pnl.disclaimer || '';
+
+      const eq = pnl.equity_window || {};
+      const closed = pnl.closed_trade_stats || {};
+      const ce = $('pnl-card-eq');
+      if (ce) {
+        if (closed.closed_trades) {
+          ce.textContent =
+            'Σ ' +
+            fmtSignedPnl(Number(closed.sum_net_pnl_usdt), 'USDT') +
+            ' · ' +
+            (closed.win_rate_pct != null ? Number(closed.win_rate_pct).toFixed(1) + '% TP hit' : '—') +
+            ' · ' +
+            (closed.closed_trades != null ? closed.closed_trades + ' trades' : '');
+        } else {
+          ce.textContent = 'No closed trades yet.';
+        }
+      }
+
+      const vi = pnl.vs_initial || {};
+      const ci = $('pnl-card-init');
+      if (ci) {
+        if (vi.ok) {
+          ci.textContent =
+            'Δ ' +
+            fmtSignedPnl(vi.delta_usdt, 'USDT') +
+            ' · ' +
+            (vi.return_pct != null ? fmtPct(vi.return_pct / 100) : '—') +
+            ' (' +
+            (vi.mode || '') +
+            ')';
+        } else {
+          ci.textContent = vi.note || '—';
+        }
+      }
+
+      const ts = pnl.trade_summary || {};
+      const cl = $('pnl-card-ledger');
+      if (cl) {
+        const n = ts.closed_trades != null ? ts.closed_trades : 0;
+        const tpHit =
+          ts.win_rate_pct != null ? ts.win_rate_pct.toFixed(1) + '% TP hit' : '— TP hit';
+        const netPos =
+          ts.net_positive_pct != null ? ts.net_positive_pct.toFixed(1) + '% net > 0' : '— net > 0';
+        cl.textContent =
+          n +
+          ' trades · ' +
+          tpHit +
+          ' · ' +
+          netPos +
+          ' · Σ net ' +
+          (ts.sum_net_pnl_usdt != null ? fmtSignedPnl(ts.sum_net_pnl_usdt, 'USDT') : '—') +
+          ' · Σ fees ' +
+          (ts.sum_fee_usdt != null ? Number(ts.sum_fee_usdt).toFixed(4) : '—');
+      }
+
+      const ca = pnl.cost_assumptions || {};
+      const cc = $('pnl-card-cost');
+      if (cc) {
+        cc.textContent =
+          'LIVE fee ' +
+          (ca.live_fee_bps != null ? ca.live_fee_bps : '—') +
+          ' bps · slip ' +
+          (ca.live_slippage_bps != null ? ca.live_slippage_bps : '—') +
+          ' bps\nBT fee ' +
+          (ca.backtest_fee_bps != null ? ca.backtest_fee_bps : '—') +
+          ' · slip ' +
+          (ca.backtest_slippage_bps != null ? ca.backtest_slippage_bps : '—');
+      }
+
+      const rb = $('pnl-rollups-body');
+      if (rb) {
+        rb.innerHTML = '';
+        const rows = [];
+        if (vi.ok) {
+          rows.push({
+            label: vi.label || 'vs initial',
+            d: vi.delta_usdt,
+            r: vi.return_pct != null ? vi.return_pct / 100 : null,
+            dd: null,
+            detail: vi.mode || '',
+          });
+        }
+        const bt = pnl.backtest || {};
+        if (bt.total_return_pct != null || bt.max_drawdown_pct != null) {
+          rows.push({
+            label: bt.label || 'Last backtest (sim)',
+            d: null,
+            r: bt.total_return_pct != null ? Number(bt.total_return_pct) / 100 : null,
+            dd: bt.max_drawdown_pct != null ? Number(bt.max_drawdown_pct) : null,
+            detail:
+              (bt.trades != null ? bt.trades + ' trades' : '') +
+              (bt.symbol ? ' · ' + bt.symbol : '') +
+              (bt.timeframe ? ' ' + bt.timeframe : ''),
+          });
+        }
+        if (!rows.length) {
+          const tr = document.createElement('tr');
+          tr.innerHTML = '<td colspan="5" class="py-3 text-slate-500">No rollup data yet.</td>';
+          rb.appendChild(tr);
+        } else {
+          rows.forEach(function (row) {
+            const tr = document.createElement('tr');
+            tr.className = 'border-b border-surface-border/50';
+            const dStr = row.d != null && Number.isFinite(Number(row.d)) ? fmtSignedPnl(Number(row.d), 'USDT') : '—';
+            const rStr = row.r != null && Number.isFinite(Number(row.r)) ? fmtPct(Number(row.r)) : '—';
+            const ddStr = row.dd != null && Number.isFinite(Number(row.dd)) ? Number(row.dd).toFixed(2) + '%' : '—';
+            tr.innerHTML =
+              '<td class="py-2 pr-3">' +
+              row.label +
+              '</td><td class="py-2 pr-3 tabular-nums">' +
+              dStr +
+              '</td><td class="py-2 pr-3 tabular-nums">' +
+              rStr +
+              '</td><td class="py-2 pr-3 tabular-nums">' +
+              ddStr +
+              '</td><td class="py-2 text-slate-400 text-xs">' +
+              (row.detail || '') +
+              '</td>';
+            rb.appendChild(tr);
+          });
+        }
+      }
+
+      // Closed-trades table is owned by the trades widget (loadTrades/renderTradesRows
+      // below), which reads the filtered/paginated /api/dashboard/trades endpoint
+      // instead of the unfiltered pnl.recent_trades snapshot.
+    }
+
+    function renderTradeRows(tbodyEl, trades) {
+      tbodyEl.innerHTML = '';
+      if (!trades.length) {
+        const tr = document.createElement('tr');
+        tr.innerHTML =
+          '<td colspan="7" class="py-4 text-slate-500">No closed trades match these filters yet.</td>';
+        tbodyEl.appendChild(tr);
+        return;
+      }
+      trades.forEach(function (t) {
+        const tr = document.createElement('tr');
+        tr.className = 'border-b border-surface-border/50';
+        const net = t.net_pnl_usdt != null ? Number(t.net_pnl_usdt) : NaN;
+        const fee = t.fee_usdt != null ? Number(t.fee_usdt).toFixed(4) : '—';
+        const nt = netClass(net);
+        tr.innerHTML =
+          '<td class="py-2 pr-3 font-mono text-xs">' +
+          TRDashboard.escapeHtml(t.utc ? fmtUtc(t.utc) : '—') +
+          '</td><td class="py-2 pr-3 font-mono">' +
+          TRDashboard.escapeHtml(t.symbol || '—') +
+          '</td><td class="py-2 pr-3">' +
+          TRDashboard.escapeHtml(t.position_side || '—') +
+          '</td><td class="py-2 pr-3">' +
+          TRDashboard.escapeHtml(t.outcome || '—') +
+          '</td><td class="py-2 pr-3 tabular-nums ' +
+          nt +
+          '">' +
+          (Number.isFinite(net) ? fmtSignedPnl(net, 'USDT') : '—') +
+          '</td><td class="py-2 pr-3 tabular-nums">' +
+          fee +
+          '</td><td class="py-2">' +
+          (t.paper === true ? 'yes' : t.paper === false ? 'no' : '—') +
+          '</td>';
+        tbodyEl.appendChild(tr);
+      });
+    }
+
+    const tradesState = { symbol: '', side: '', outcome: '', from: '', to: '', offset: 0, limit: 20 };
+
+    function tradesQueryParams(extra) {
+      const p = new URLSearchParams();
+      if (tradesState.symbol) p.set('symbol', tradesState.symbol);
+      if (tradesState.side) p.set('side', tradesState.side);
+      if (tradesState.outcome) p.set('outcome', tradesState.outcome);
+      if (tradesState.from) p.set('from', tradesState.from + 'T00:00:00+00:00');
+      if (tradesState.to) p.set('to', tradesState.to + 'T23:59:59+00:00');
+      p.set('offset', String(tradesState.offset));
+      p.set('limit', String(tradesState.limit));
+      if (extra) for (const k in extra) p.set(k, extra[k]);
+      return p;
+    }
+
+    async function loadTrades() {
+      const tb = $('pnl-trades-body');
+      if (!tb) return;
+      try {
+        const params = tradesQueryParams();
+        const data = await TRDashboard.fetchDashboardJson('/api/dashboard/trades?' + params.toString());
+        if (data === null) return;
+        renderTradeRows(tb, data.rows || []);
+        const info = $('trades-page-info');
+        if (info) {
+          const start = data.total_matched ? data.offset + 1 : 0;
+          const end = data.offset + (data.rows || []).length;
+          info.textContent = data.total_matched
+            ? 'Showing ' + start + '–' + end + ' of ' + data.total_matched
+            : 'No matching trades';
+        }
+        const prevBtn = $('trades-prev');
+        const nextBtn = $('trades-next');
+        if (prevBtn) prevBtn.disabled = tradesState.offset <= 0;
+        if (nextBtn) nextBtn.disabled = !data.has_more;
+        const summary = $('trades-summary');
+        if (summary) {
+          summary.textContent = data.truncated
+            ? 'Scanned the ' + data.scanned + ' most recent ledger lines (older trades not scanned for this filter).'
+            : '';
+        }
+      } catch (e) {
+        const summary = $('trades-summary');
+        if (summary) summary.textContent = 'Failed to load trades: ' + ((e && e.message) || String(e));
+      }
+    }
+
+    function wireTradesWidget() {
+      const apply = $('trades-f-apply');
+      if (apply) {
+        apply.addEventListener('click', () => {
+          tradesState.symbol = ($('trades-f-symbol') || {}).value || '';
+          tradesState.side = ($('trades-f-side') || {}).value || '';
+          tradesState.outcome = ($('trades-f-outcome') || {}).value || '';
+          tradesState.from = ($('trades-f-from') || {}).value || '';
+          tradesState.to = ($('trades-f-to') || {}).value || '';
+          tradesState.offset = 0;
+          loadTrades();
+        });
+      }
+      const clear = $('trades-f-clear');
+      if (clear) {
+        clear.addEventListener('click', () => {
+          ['trades-f-symbol', 'trades-f-side', 'trades-f-outcome', 'trades-f-from', 'trades-f-to'].forEach((id) => {
+            const el = $(id);
+            if (el) el.value = '';
+          });
+          tradesState.symbol = tradesState.side = tradesState.outcome = tradesState.from = tradesState.to = '';
+          tradesState.offset = 0;
+          loadTrades();
+        });
+      }
+      const prev = $('trades-prev');
+      if (prev) {
+        prev.addEventListener('click', () => {
+          tradesState.offset = Math.max(0, tradesState.offset - tradesState.limit);
+          loadTrades();
+        });
+      }
+      const next = $('trades-next');
+      if (next) {
+        next.addEventListener('click', () => {
+          tradesState.offset += tradesState.limit;
+          loadTrades();
+        });
+      }
+      const exportBtn = $('trades-export-csv');
+      if (exportBtn) {
+        exportBtn.addEventListener('click', async () => {
+          const summary = $('trades-summary');
+          exportBtn.disabled = true;
+          try {
+            const params = tradesQueryParams({ format: 'csv', limit: '1000', offset: '0' });
+            await TRDashboard.downloadDashboardFile(
+              '/api/dashboard/trades?' + params.toString(),
+              'trades.csv'
+            );
+          } catch (e) {
+            if (summary) summary.textContent = 'CSV export failed: ' + ((e && e.message) || String(e));
+          } finally {
+            exportBtn.disabled = false;
+          }
+        });
+      }
+      loadTrades();
+    }
+
+    function renderBestFit(bestFit, cfg) {
+      const score = $('bf-score');
+      const summary = $('bf-summary');
+      const pill = $('bf-pill');
+      const note = $('bf-note');
+      const openJson = $('bf-open-json');
+      const drift = $('bf-max-drift');
+      const bf = bestFit || {};
+      const c = cfg || {};
+      if (!score || !summary || !pill || !note || !openJson) return;
+      if (drift) {
+        drift.textContent = '';
+        drift.classList.add('hidden');
+      }
+      if (bf.available !== true) {
+        score.textContent = '—';
+        summary.textContent = 'No best-fit winner available yet.';
+        pill.textContent = 'Missing';
+        pill.className = 'px-3 py-1 rounded-full text-xs font-medium bg-slate-700 text-slate-300';
+        note.textContent = bf.note ? ('Read error: ' + bf.note) : 'Run sweep script to generate winner.json.';
+        openJson.classList.add('hidden');
+        return;
+      }
+      const mean = Number(bf.mean_score);
+      score.textContent = Number.isFinite(mean) ? mean.toFixed(4) : '—';
+      const up = bf.env_updates || {};
+      summary.textContent =
+        (up.TIMEFRAME || '—') + ' · trend=' + (up.TREND_STRATEGY_ENABLED || '—') +
+        ' · ta_filter=' + (up.USE_TA_FILTER || '—') + ' · sentiment=' +
+        (up.BACKTEST_SENTIMENT_MODE || '—');
+      pill.textContent = 'Loaded';
+      pill.className = 'px-3 py-1 rounded-full text-xs font-medium bg-emerald-900/60 text-emerald-300';
+      note.textContent =
+        'RSI ' + (up.SIGNAL_RSI_OVERSOLD || '—') + '/' + (up.SIGNAL_RSI_OVERBOUGHT || '—') +
+        ' · ADX MR ' + (up.ADX_MAX_FOR_MEAN_REVERSION || '—') +
+        ' · ADX trend ' + (up.ADX_MIN_FOR_TREND || '—') +
+        ' · max/day ' + (up.MAX_TRADES_PER_DAY || '—');
+      openJson.classList.remove('hidden');
+      if (drift) {
+        const liveMax = c.max_trades_per_day;
+        const winMax = up.MAX_TRADES_PER_DAY;
+        const liveStr = liveMax != null && liveMax !== '' ? String(liveMax) : null;
+        const winStr = winMax != null && winMax !== '' ? String(winMax) : null;
+        if (liveStr != null && winStr != null && liveStr !== winStr) {
+          drift.textContent =
+            'Live max trades/day (' + liveStr + ') differs from best-fit file (' + winStr + ').';
+          drift.classList.remove('hidden');
+        }
+      }
+    }
+
+    function netClass(n) {
+      if (!Number.isFinite(n)) return 'text-slate-300';
+      return n >= 0 ? 'text-emerald-400' : 'text-rose-300';
+    }
+
+    function renderStrategyPromotion(sp) {
+      const sum = $('sp-summary');
+      const soak = $('sp-soak');
+      const ptr = $('sp-pointers');
+      const checklist = $('sp-checklist');
+      if (!sum || !sp) return;
+      const tier = sp.deployment_tier || '—';
+      const prof = sp.active_strategy_profile_id || '—';
+      const frozen = sp.promotions_frozen ? 'yes' : 'no';
+      const ev = sp.last_evaluate || {};
+      let gate = '—';
+      if (ev.passed === true) gate = 'all pass';
+      else if (ev.passed === false) gate = 'some failed';
+      sum.textContent = 'Tier ' + tier + ' · active profile ' + prof + ' · promotions frozen ' + frozen + ' · gates ' + gate;
+      if (soak) {
+        const th = sp.thresholds || {};
+        soak.textContent = 'Soak thresholds: min trades ' + (th.min_trades != null ? th.min_trades : '—')
+          + ', min calendar days ' + (th.min_calendar_days != null ? th.min_calendar_days : '—')
+          + ', max equity DD ' + (th.max_equity_drawdown_pct != null ? th.max_equity_drawdown_pct : '—');
+      }
+      if (ptr) {
+        const p = sp.pointers || {};
+        ptr.textContent = 'Pointers: paper=' + JSON.stringify(p.paper) + ' canary=' + JSON.stringify(p.live_canary) + ' full=' + JSON.stringify(p.live_full);
+      }
+      if (checklist) {
+        const outcomes = Array.isArray(ev.outcomes) ? ev.outcomes : [];
+        if (!outcomes.length) {
+          checklist.innerHTML = '<p class="text-xs text-slate-500">No gate evaluation recorded yet.</p>';
+        } else {
+          checklist.innerHTML = outcomes
+            .map(function (o) {
+              const passed = o && o.passed === true;
+              const label = TRDashboard.escapeHtml((o && o.name) || 'gate');
+              const detail = TRDashboard.escapeHtml((o && o.detail) || '—');
+              const threshold = TRDashboard.escapeHtml(JSON.stringify((o && o.threshold) != null ? o.threshold : (o && o.configured_threshold) != null ? o.configured_threshold : '—'));
+              const dot = passed ? 'bg-emerald-500' : 'bg-rose-400';
+              const text = passed ? 'text-emerald-300' : 'text-rose-200';
+              return (
+                '<div class="rounded-lg border border-surface-border bg-surface/70 px-3 py-2">' +
+                '<div class="flex items-center justify-between gap-3">' +
+                '<div class="flex items-center gap-2">' +
+                '<span class="inline-block h-2.5 w-2.5 rounded-full ' + dot + '"></span>' +
+                '<span class="text-sm font-medium ' + text + '">' + label + '</span>' +
+                '</div>' +
+                '<span class="text-[11px] text-slate-500">threshold ' + threshold + '</span>' +
+                '</div>' +
+                '<p class="mt-1 text-xs text-slate-400">' + detail + '</p>' +
+                '</div>'
+              );
+            })
+            .join('');
+        }
+      }
+    }
+
+
+    function renderStartupPipeline(sp) {
+      const s = $('startup-summary');
+      const t = $('startup-time');
+      if (!s) return;
+      if (!sp) {
+        s.textContent = 'No startup pipeline result recorded yet.';
+        if (t) t.textContent = '—';
+        return;
+      }
+      const ok = sp.passed === true;
+      const reason = sp.reason || 'ok';
+      s.textContent = 'Last startup pipeline: ' + (ok ? 'passed' : 'failed') + ' (' + reason + ')';
+      if (t) t.textContent = 'UTC: ' + (sp.utc || '—');
+    }
+
+    let lastStrategyEngineStatus = null;
+    let lastFundHalted = null;
+    let lastAlerts = [];
+
+    function renderStrategyEngine(ses) {
+      ses = ses || {};
+      lastStrategyEngineStatus = ses;
+      const sum = $('se-summary');
+      const pill = $('se-shadow-pill');
+      if (sum) {
+        const engine = ses.strategy_engine || 'legacy';
+        const minScore = ses.smc_min_trade_score != null ? ses.smc_min_trade_score : '—';
+        const exitMode = ses.exit_mode || '—';
+        sum.textContent = 'Engine: ' + engine + ' · SMC min score ' + minScore + ' · exit mode ' + exitMode;
+      }
+      if (pill) {
+        const ag = ses.shadow_agreement;
+        if ((ses.strategy_engine || '').toLowerCase() === 'shadow' && ag && ag.pairs) {
+          pill.textContent = 'Shadow agreement ' + (ag.rate * 100).toFixed(1) + '% (' + ag.agree + '/' + ag.pairs + ')';
+          pill.className =
+            'px-3 py-1 rounded-full text-xs font-medium ' +
+            (ag.rate >= 0.8 ? 'bg-emerald-900/60 text-emerald-300' : 'bg-amber-900/60 text-amber-200');
+        } else {
+          pill.textContent = '';
+          pill.className = 'hidden px-3 py-1 rounded-full text-xs font-medium bg-slate-700 text-slate-300';
+        }
+      }
+    }
+
+    function renderCompareModal() {
+      TRDashboard.renderCompareModal(lastStrategyEngineStatus || {});
+    }
+
+    function openCompareModal() {
+      TRDashboard.openCompareModal(lastStrategyEngineStatus || {});
+    }
+
+    function closeCompareModal() {
+      TRDashboard.closeCompareModal();
+    }
+
+    function setQaError(msg) {
+      const el = $('qa-error');
+      if (!el) return;
+      if (msg) {
+        el.textContent = msg;
+        el.classList.remove('hidden');
+      } else {
+        el.textContent = '';
+        el.classList.add('hidden');
+      }
+    }
+
+    function setQaBusy(busy, statusText) {
+      document.querySelectorAll('.qa-btn').forEach((btn) => {
+        btn.disabled = !!busy;
+      });
+      const status = $('qa-job-status');
+      if (status) status.textContent = statusText || (busy ? 'Working…' : '—');
+    }
+
+    async function runJobAction(url, body, kind) {
+      setQaError('');
+      setQaBusy(true, 'Starting ' + kind + '…');
+      try {
+        const job = await TRDashboard.postAction(url, body);
+        const final = await TRDashboard.pollJob(job.id, {
+          onUpdate: (j) => setQaBusy(true, kind + ': ' + j.status + '…'),
+        });
+        if (final.status === 'error') {
+          setQaError(kind + ' failed: ' + (final.error || 'unknown error'));
+          setQaBusy(false, kind + ': failed');
+        } else {
+          setQaBusy(false, kind + ': done');
+        }
+        return final;
+      } catch (e) {
+        setQaError((e && e.message) || String(e));
+        setQaBusy(false, kind + ': error');
+        throw e;
+      }
+    }
+
+    function wireQuickActions() {
+      const resetBtn = $('qa-circuit-reset');
+      if (resetBtn) {
+        resetBtn.addEventListener('click', async () => {
+          if (!(await TRDashboard.confirmAction({ title: 'Reset circuit breaker', body: 'Reset the circuit breaker and allow new entries again if no other halt is active?', okLabel: 'Reset' }))) return;
+          setQaError('');
+          setQaBusy(true, 'Resetting circuit breaker…');
+          try {
+            await TRDashboard.postAction('/api/dashboard/actions/circuit-reset');
+            setQaBusy(false, 'Circuit reset requested — refreshes on next poll.');
+          } catch (e) {
+            setQaError((e && e.message) || String(e));
+            setQaBusy(false, 'Circuit reset: error');
+          }
+        });
+      }
+
+      const toggleBtn = $('qa-trading-toggle');
+      if (toggleBtn) {
+        toggleBtn.addEventListener('click', async () => {
+          const pausing = !lastFundHalted;
+          if (
+            !(await TRDashboard.confirmAction({
+              title: pausing ? 'Pause trading' : 'Resume trading',
+              body: pausing
+                ? 'Pause new entries? Existing positions will still be managed until resumed.'
+                : 'Resume opening new entries?',
+              okLabel: pausing ? 'Pause' : 'Resume',
+            }))
+          ) return;
+          setQaError('');
+          setQaBusy(true, pausing ? 'Pausing…' : 'Resuming…');
+          try {
+            const url = pausing ? '/api/dashboard/actions/trading-pause' : '/api/dashboard/actions/trading-resume';
+            await TRDashboard.postAction(url, pausing ? { reason: 'manual pause via dashboard' } : {});
+            setQaBusy(false, pausing ? 'Paused' : 'Resumed');
+          } catch (e) {
+            setQaError((e && e.message) || String(e));
+            setQaBusy(false, 'error');
+          }
+        });
+      }
+
+      const btBtn = $('qa-backtest-run');
+      if (btBtn) {
+        btBtn.addEventListener('click', async () => {
+          if (!(await TRDashboard.confirmAction({ title: 'Run backtest', body: 'Start a new background backtest run now?', okLabel: 'Run backtest' }))) return;
+          runJobAction('/api/dashboard/actions/backtest-run', {}, 'Backtest').catch(() => {});
+        });
+      }
+
+      const trainBtn = $('qa-training-run');
+      if (trainBtn) {
+        trainBtn.addEventListener('click', async () => {
+          if (!(await TRDashboard.confirmAction({ title: 'Run training', body: 'Start a new background training run now?', okLabel: 'Run training' }))) return;
+          runJobAction('/api/dashboard/actions/training-run', {}, 'Training').catch(() => {});
+        });
+      }
+
+      const cmpBtn = $('qa-compare-run');
+      if (cmpBtn) {
+        cmpBtn.addEventListener('click', async () => {
+          if (!(await TRDashboard.confirmAction({ title: 'Compare legacy vs SMC', body: 'Run a new background compare job using the latest available artifacts?', okLabel: 'Run compare' }))) return;
+          runJobAction('/api/dashboard/actions/backtest-compare', {}, 'Compare')
+            .then(() => renderCompareModal())
+            .catch(() => {});
+        });
+      }
+
+      // Shared wiring restores focus to the opener after close.
+      TRDashboard.wireCompareModal(function () {
+        return lastStrategyEngineStatus || {};
+      }, ['se-compare-open', 'perf-compare-open']);
+    }
+
+    function alertLinks(alert) {
+      const out = [];
+      if (alert && alert.href) out.push({ label: 'Open linked page', href: alert.href });
+      if (alert && (alert.id === 'circuit_tripped' || alert.id === 'nav_drawdown' || alert.id === 'trading_halted')) {
+        out.push({ label: 'Risk page', href: '/dashboard/risk.html' });
+      }
+      if (alert && alert.id === 'gates_failed') {
+        out.push({ label: 'Strategy page', href: '/dashboard/strategy.html' });
+      }
+      return out;
+    }
+
+    function hideAlertDetails() {
+      const wrap = $('alert-details');
+      if (wrap) wrap.classList.add('hidden');
+    }
+
+    function showAlertDetails(idx) {
+      const alert = lastAlerts[idx];
+      if (!alert) return;
+      const wrap = $('alert-details');
+      const title = $('alert-details-title');
+      const body = $('alert-details-body');
+      const links = $('alert-details-links');
+      if (!wrap || !title || !body || !links) return;
+      title.textContent = alert.message || alert.id || 'Alert details';
+      body.textContent = alert.details || 'No additional details.';
+      links.innerHTML = alertLinks(alert)
+        .map(function (link) {
+          return '<a class="text-accent hover:underline" href="' + TRDashboard.escapeHtml(link.href) + '">' + TRDashboard.escapeHtml(link.label) + '</a>';
+        })
+        .join('');
+      wrap.classList.remove('hidden');
+    }
+
+    function renderAlertBar(alerts) {
+      const bar = $('alert-bar');
+      if (!bar) return;
+      alerts = Array.isArray(alerts) ? alerts : [];
+      lastAlerts = alerts;
+      if (!alerts.length) {
+        bar.classList.add('hidden');
+        bar.innerHTML = '';
+        hideAlertDetails();
+        return;
+      }
+      const styles = {
+        critical: 'bg-rose-950/70 border border-rose-500/40 text-rose-100',
+        warning: 'bg-amber-950/60 border border-amber-500/30 text-amber-100',
+        info: 'bg-slate-800/70 border border-surface-border text-slate-200',
+      };
+      bar.innerHTML = alerts
+        .map(function (a, idx) {
+          const cls = styles[a.severity] || styles.info;
+          const msg = TRDashboard.escapeHtml(a.message || a.id || 'Alert');
+          const href = a.href ? TRDashboard.escapeHtml(a.href) : '';
+          const dot = a.severity === 'critical' ? '\u25cf' : '\u25b2';
+          const body = '<span class="mr-2">' + dot + '</span><span>' + msg + '</span>';
+          return (
+            '<div class="text-sm font-medium rounded px-3 py-2 max-w-6xl mx-auto flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 ' +
+            cls +
+            '">' +
+            '<button type="button" data-alert-idx="' + idx + '" class="alert-toggle text-left flex items-center hover:underline">' + body + '</button>' +
+            '<div class="flex flex-wrap gap-3 text-xs">' +
+            '<button type="button" data-alert-idx="' + idx + '" class="alert-toggle hover:underline">Details</button>' +
+            (href ? '<a href="' + href + '" class="hover:underline">Open</a>' : '') +
+            '</div>' +
+            '</div>'
+          );
+        })
+        .join('');
+      bar.classList.remove('hidden');
+      bar.querySelectorAll('.alert-toggle').forEach(function (btn) {
+        btn.addEventListener('click', function () {
+          const idx = Number(btn.getAttribute('data-alert-idx'));
+          showAlertDetails(idx);
+        });
+      });
+    }
+
+    function render(data) {
+      const errBanner = $('error-banner');
+      if (errBanner) errBanner.classList.add('hidden');
+      renderAlertBar(data.alerts);
+      const dep = data.dependencies || {};
+      const st = data.status;
+      const pgDown = !!(dep.postgres && dep.postgres.ok === false);
+      const pillStatusEl = $('pill-status');
+      if (pillStatusEl) {
+        if (st === 'ready') {
+          if (pgDown) {
+            pillStatusEl.textContent = 'Ready · Postgres down';
+            pillStatusEl.className = 'dash-pill bg-amber-900/60 text-amber-200';
+          } else {
+            pillStatusEl.textContent = 'All deps up';
+            pillStatusEl.className = 'dash-pill bg-emerald-900/60 text-emerald-300';
+          }
+        } else {
+          pillStatusEl.textContent = 'Degraded';
+          pillStatusEl.className = 'dash-pill bg-amber-900/60 text-amber-200';
+        }
+      }
+      const rlat = dep.redis && dep.redis.latency_ms != null ? ' ' + dep.redis.latency_ms + 'ms' : '';
+      const plat = dep.postgres && dep.postgres.latency_ms != null ? ' ' + dep.postgres.latency_ms + 'ms' : '';
+      pill($('pill-redis'), dep.redis && dep.redis.ok, 'Redis ' + (dep.redis && dep.redis.ok ? 'OK' : 'down') + rlat);
+      pill($('pill-pg'), dep.postgres && dep.postgres.ok, 'PG ' + (dep.postgres && dep.postgres.ok ? 'OK' : 'down') + plat);
+
+      const cfg = data.config || {};
+      const modeLabel = cfg.paper_trading ? 'Paper trading' : 'Live trading';
+      const envLabel = cfg.notify_environment || 'default';
+      const pub = cfg.public_base_url || '';
+      const origin = (typeof window !== 'undefined' && window.location && window.location.origin) ? window.location.origin : '';
+      let exposure = modeLabel + ' · Notify: ' + envLabel;
+      if (pub) exposure += ' · Reachable: ' + pub;
+      else exposure += ' · This page: ' + origin + ' (set PUBLIC_BASE_URL in .env for a stable external URL)';
+      const expEl = $('exposure-text');
+      if (expEl) expEl.textContent = exposure;
+
+      const ops = data.ops || {};
+      const ll = $('val-last-loop');
+      if (ll) ll.textContent = ops.last_loop_utc ? fmtUtc(ops.last_loop_utc) : '—';
+      const hb = $('val-heartbeat');
+      const hbd = $('val-heartbeat-detail');
+      if (hb && hbd) {
+        if (ops.heartbeat_ok === true) {
+          hb.textContent = 'OK';
+          hb.className = 'mt-2 text-lg font-semibold text-emerald-400';
+          const sec = ops.heartbeat_stale_seconds;
+          hbd.textContent = ops.pid != null
+            ? ('pid ' + ops.pid + (sec != null ? ' · age ' + Math.round(sec) + 's' : ''))
+            : (sec != null ? 'age ' + Math.round(sec) + 's' : '—');
+        } else {
+          hb.textContent = ops.last_loop_utc ? 'Stale / unknown' : 'No data';
+          hb.className = 'mt-2 text-lg font-semibold text-rose-400';
+          const sec = ops.heartbeat_stale_seconds;
+          const thr = ops.heartbeat_threshold_seconds;
+          hbd.textContent = (sec != null && thr != null)
+            ? ('age ' + Math.round(sec) + 's (threshold ' + Math.round(thr) + 's)' + (ops.pid != null ? ' · pid ' + ops.pid : ''))
+            : (ops.pid != null ? 'pid ' + ops.pid : '—');
+        }
+      }
+      const ve = $('val-last-err');
+      const vet = $('val-last-err-time');
+      if (ve && vet) {
+        if (ops.last_error) {
+          ve.textContent = ops.last_error;
+          ve.className = 'mt-2 text-sm text-amber-200 line-clamp-4 font-mono';
+          vet.textContent = ops.last_error_utc ? fmtUtc(ops.last_error_utc) : '—';
+        } else {
+          ve.textContent = 'None';
+          ve.className = 'mt-2 text-sm text-slate-500 line-clamp-4 font-mono';
+          vet.textContent = '—';
+        }
+      }
+
+      const ehd = data.equity_history_display || {};
+      renderSparkline(ehd.points || (data.equity_history || {}).points || []);
+      const eqNote = $('eq-outliers-note');
+      if (eqNote) {
+        if (ehd.outliers_dropped != null && ehd.outliers_dropped > 0) {
+          eqNote.textContent =
+            'Excluded ' + ehd.outliers_dropped + ' outlier NAV sample(s) from this chart (stale/corrupt equity_history.json entries).';
+          eqNote.classList.remove('hidden');
+        } else {
+          eqNote.textContent = '';
+          eqNote.classList.add('hidden');
+        }
+      }
+      renderPerformance(data);
+      // Auto-refresh the trades widget on the main poll cycle, but only while on
+      // page 1 (offset 0) with no manual pagination in flight, so we don't yank
+      // the user off a page they're actively reviewing.
+      if (tradesState.offset === 0) loadTrades();
+
+      renderStrategyEngine(data.strategy_engine_status);
+
+      const qaSection = $('quick-actions');
+      if (qaSection) {
+        if (cfg.dashboard_writes_enabled) qaSection.classList.remove('hidden');
+        else qaSection.classList.add('hidden');
+      }
+
+      renderTrading(data.trading);
+
+      const modeEl = $('pill-mode');
+      if (modeEl) {
+        modeEl.textContent = cfg.paper_trading ? 'Paper' : 'Live';
+        modeEl.className = 'dash-pill ' + (cfg.paper_trading ? 'bg-sky-900/60 text-sky-200' : 'bg-orange-900/60 text-orange-200');
+      }
+      const tierEl = $('pill-tier');
+      if (tierEl) {
+        tierEl.textContent = cfg.deployment_tier || 'tier';
+        tierEl.className = 'dash-pill';
+      }
+
+      const cr = $('cfg-risk'); if (cr) cr.textContent = cfg.risk_per_trade != null ? String(cfg.risk_per_trade) : '—';
+      const cm = $('cfg-max'); if (cm) cm.textContent = cfg.max_trades_per_day != null ? String(cfg.max_trades_per_day) : '—';
+      const cp = $('cfg-poll'); if (cp) cp.textContent = cfg.poll_seconds != null ? String(cfg.poll_seconds) : '—';
+      const cc = $('cfg-cmax'); if (cc) cc.textContent = cfg.circuit_breaker_max_consecutive_losses != null ? String(cfg.circuit_breaker_max_consecutive_losses) : '—';
+
+      const fund = data.fund || {};
+      const fs = fund.state;
+      lastFundHalted = !!(fund.halt_file || (fs && fs.halted));
+      const toggleBtn = $('qa-trading-toggle');
+      if (toggleBtn) toggleBtn.textContent = lastFundHalted ? 'Resume trading' : 'Pause trading';
+      const setTxt = (id, v) => { const el = $(id); if (el) el.textContent = v; };
+      if (fund.enabled && fs) {
+        setTxt('val-nav', Number(fs.last_nav).toLocaleString(undefined, { maximumFractionDigits: 2 }) + ' ' + (cfg.fund_quote_asset || 'USDT'));
+        setTxt('val-nav-updated', fs.last_update_utc || '—');
+        const peak = Number(fs.peak_nav);
+        const nav = Number(fs.last_nav);
+        const dd = peak > 0 ? (peak - nav) / peak : 0;
+        setTxt('val-dd', 'Drawdown: ' + fmtPct(dd));
+        setTxt('val-peak', 'Peak: ' + peak.toLocaleString(undefined, { maximumFractionDigits: 2 }));
+        const vh = $('val-halt');
+        if (vh) {
+          vh.textContent = fs.halted ? 'Halted' : 'Not halted';
+          vh.className = 'mt-2 text-lg font-semibold ' + (fs.halted ? 'text-rose-400' : 'text-emerald-400');
+        }
+        setTxt('val-halt-reason', fs.halted
+          ? ((fs.halt_reason || '—') + (fund.halt_file ? ' (manual halt file)' : ''))
+          : (fund.halt_file ? 'Manual halt file present' : '—'));
+      } else {
+        setTxt('val-nav', fund.enabled ? '—' : 'Managers off');
+        setTxt('val-nav-updated', '—');
+        setTxt('val-dd', 'Drawdown: —');
+        setTxt('val-peak', 'Peak: —');
+        setTxt('val-halt', fund.enabled ? '—' : 'N/A');
+        setTxt('val-halt-reason', fund.error || '');
+      }
+
+      const circ = data.circuit || {};
+      const n = circ.consecutive_losses;
+      const m = circ.max_consecutive_losses || cfg.circuit_breaker_max_consecutive_losses;
+      const vc = $('val-circuit');
+      if (vc) vc.textContent = n != null && m != null ? n + ' / ' + m : '—';
+      const tripped = circ.tripped === true;
+      const vct = $('val-circuit-trip');
+      if (vct) {
+        vct.textContent = tripped ? 'Tripped — trading paused' : (n != null ? 'Within limit' : 'No state file yet');
+        vct.className = 'text-xs mt-1 ' + (tripped ? 'text-rose-400' : 'text-slate-400');
+      }
+      const openEl = $('val-open-positions');
+      if (openEl) {
+        const bySym = (data.trading && data.trading.by_symbol) || {};
+        let openN = 0;
+        if (data.trading && data.trading.open_positions_count != null) {
+          openN = Number(data.trading.open_positions_count);
+        } else {
+          Object.keys(bySym).forEach(function (sym) {
+            const row = bySym[sym] || {};
+            if (row.holding) openN += 1;
+          });
+        }
+        openEl.textContent = Number.isFinite(openN) ? String(openN) : '0';
+      }
+
+      const port = data.portfolio || {};
+      const weights = port.weights || {};
+      const tb = $('portfolio-body');
+      if (tb) {
+        tb.innerHTML = '';
+        const keys = Object.keys(weights).sort();
+        if (!keys.length) {
+          const tr = document.createElement('tr');
+          tr.innerHTML = '<td colspan="2" class="py-3 text-slate-500">No symbols</td>';
+          tb.appendChild(tr);
+        } else {
+          keys.forEach((sym) => {
+            const tr = document.createElement('tr');
+            tr.className = 'border-b border-surface-border/50';
+            const w = Number(weights[sym]);
+            const wStr = Number.isFinite(w) ? w.toFixed(4) : String(weights[sym]);
+            tr.innerHTML = '<td class="py-2 pr-4 font-mono text-slate-200">' + sym + '</td><td class="py-2 tabular-nums">' + wStr + '</td>';
+            tb.appendChild(tr);
+          });
+        }
+      }
+    }
+
+    const OVERVIEW_SECTIONS =
+      'alerts,ops,equity_history_display,fund,pnl,trading,config,circuit,strategy_engine_status,portfolio,backtest';
+
+    async function loadSummary() {
+      const data = await TRDashboard.fetchDashboardJson(
+        '/api/dashboard/summary?sections=' + encodeURIComponent(OVERVIEW_SECTIONS)
+      );
+      if (data === null) return;
+      render(data);
+    }
+
+    async function checkStaleJob() {
+      try {
+        const job = await TRDashboard.fetchDashboardJson('/api/dashboard/jobs/current');
+        const statusEl = $('qa-job-status');
+        if (job && job.stale && statusEl) {
+          statusEl.textContent =
+            'Interrupted job ' + (job.kind || job.id || '') + ' (API restarted) — status was ' + (job.status || 'unknown');
+        }
+      } catch (e) {
+        /* ignore */
+      }
+    }
+
+    TRDashboard.mountHeader({ title: 'tr_bot', subtitle: 'Overview' });
+    TRDashboard.wireTokenGate(loadSummary);
+    checkStaleJob();
+    showPerformanceTab('live');
+    const perfLiveBtn = $('perf-tab-live');
+    const perfBackBtn = $('perf-tab-backtest');
+    if (perfLiveBtn) perfLiveBtn.addEventListener('click', () => showPerformanceTab('live'));
+    if (perfBackBtn) perfBackBtn.addEventListener('click', () => showPerformanceTab('backtest'));
+    const alertCloseBtn = $('alert-details-close');
+    if (alertCloseBtn) alertCloseBtn.addEventListener('click', hideAlertDetails);
+    wireQuickActions();
+    wireTradesWidget();
+    TRDashboard.startPolling(loadSummary, 20000);
+  </script>
+</body>
+</html>

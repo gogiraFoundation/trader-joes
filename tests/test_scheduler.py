@@ -30,5 +30,8 @@ def test_run_forever_noop_when_nothing_configured() -> None:
         patch.object(config, "SCHEDULER_BACKTEST_INTERVAL_SECONDS", 0),
         patch.object(config, "SCHEDULER_PROMOTION_INTERVAL_SECONDS", 0),
         patch.object(config, "ADAPTATION_INTERVAL_SECONDS", 0),
+        patch.object(config, "SCHEDULER_COINDESK_ASSET_TOP_LIST_INTERVAL_SECONDS", 0),
+        patch.object(config, "SCHEDULER_DAILY_REPORT_INTERVAL_SECONDS", 0),
+        patch.object(config, "SCHEDULER_AGENTS_INTERVAL_SECONDS", 0),
     ):
         run_forever()

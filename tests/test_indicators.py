@@ -31,6 +31,49 @@ def test_compute_indicators_columns() -> None:
         assert col in df.columns
 
 
+def test_compute_indicators_grouped_no_cross_asset_bleed() -> None:
+    """Interleaved multi-asset frame must match per-asset solo computation."""
+    n = 80
+    a = _sample_ohlcv(n)
+    a["source"] = "exchange"
+    a["asset"] = "AAA_USDT"
+    a["close"] = 100 + np.arange(n, dtype=float)
+    a["open"] = a["close"]
+    a["high"] = a["close"] + 0.5
+    a["low"] = a["close"] - 0.5
+
+    b = _sample_ohlcv(n)
+    b["source"] = "exchange"
+    b["asset"] = "BBB_USDT"
+    b["timestamp"] = a["timestamp"]
+    # Very different price path so ungrouped EMA would diverge sharply from solo A.
+    b["close"] = 1000 + np.arange(n, dtype=float) * 10
+    b["open"] = b["close"]
+    b["high"] = b["close"] + 1.0
+    b["low"] = b["close"] - 1.0
+
+    # Interleave by timestamp (A,B,A,B,...) — worst case for ungrouped rolling.
+    mixed = (
+        pd.concat([a, b], ignore_index=True)
+        .sort_values(["timestamp", "asset"], kind="mergesort")
+        .reset_index(drop=True)
+    )
+    grouped = compute_indicators(mixed)
+    solo_a = compute_indicators(a.drop(columns=["source", "asset"]))
+
+    got = grouped.loc[grouped["asset"] == "AAA_USDT"].sort_values("timestamp").reset_index(drop=True)
+    exp = solo_a.sort_values("timestamp").reset_index(drop=True)
+    for col in ("ema20", "ema50", "rsi", "atr"):
+        np.testing.assert_allclose(
+            got[col].to_numpy(dtype=float),
+            exp[col].to_numpy(dtype=float),
+            rtol=1e-9,
+            atol=1e-9,
+            equal_nan=True,
+            err_msg=col,
+        )
+
+
 def test_extend_ta_adds_adx_macd() -> None:
     df = extend_ta(compute_indicators(_sample_ohlcv())).dropna()
     for col in ("adx", "macd", "bb_upper", "stoch_k", "volume_z"):

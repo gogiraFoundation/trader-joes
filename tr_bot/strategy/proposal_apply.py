@@ -18,7 +18,11 @@ def _merge_params(base: dict[str, Any], delta: dict[str, Any]) -> dict[str, Any]
     return out
 
 
-def apply_llm_proposal_from_dict(raw: dict[str, Any]) -> dict[str, Any]:
+def apply_llm_proposal_from_dict(
+    raw: dict[str, Any],
+    *,
+    proposal_only: bool | None = None,
+) -> dict[str, Any]:
     v = validate_llm_proposal(raw)
     if not v.get("ok"):
         return v
@@ -33,6 +37,18 @@ def apply_llm_proposal_from_dict(raw: dict[str, Any]) -> dict[str, Any]:
     hyp_raw = v.get("rationale") or "LLM proposal"
     hypothesis = str(hyp_raw)[:500]
 
+    try:
+        from tr_bot.research.hypothesis_registry import append_hypothesis
+
+        append_hypothesis(
+            description=hypothesis,
+            category="llm_proposal",
+            source="proposal_apply",
+            meta={"proposed_keys": list(delta.keys())},
+        )
+    except Exception:
+        pass
+
     extra = {
         "rationale": v.get("rationale"),
         "risk_notes": v.get("risk_notes"),
@@ -45,10 +61,15 @@ def apply_llm_proposal_from_dict(raw: dict[str, Any]) -> dict[str, Any]:
         extra_meta=extra,
         hypothesis=hypothesis,
         promotion_action="strategy_proposal",
+        proposal_only=proposal_only,
     )
 
 
-def apply_llm_proposal_from_path(path: Path) -> dict[str, Any]:
+def apply_llm_proposal_from_path(
+    path: Path,
+    *,
+    proposal_only: bool | None = None,
+) -> dict[str, Any]:
     try:
         raw_file = json.loads(path.read_text(encoding="utf-8"))
     except OSError as e:
@@ -57,4 +78,4 @@ def apply_llm_proposal_from_path(path: Path) -> dict[str, Any]:
         return {"ok": False, "errors": [f"invalid json: {e}"]}
     if not isinstance(raw_file, dict):
         return {"ok": False, "errors": ["root must be object"]}
-    return apply_llm_proposal_from_dict(raw_file)
+    return apply_llm_proposal_from_dict(raw_file, proposal_only=proposal_only)

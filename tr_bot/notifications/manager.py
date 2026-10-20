@@ -16,6 +16,7 @@ def _title_for_event(event: str) -> str:
         ev.TRADE_OPENED: "Trade opened",
         ev.TRADE_CLOSED: "Trade closed",
         ev.FUND_HALT: "Fund halt",
+        ev.REBALANCE_ALERT: "Rebalance alert",
         ev.CIRCUIT_TRIPPED: "Circuit breaker",
         ev.TRAINING_SUCCESS: "Training complete",
         ev.TRAINING_FAILED: "Training failed",
@@ -23,6 +24,8 @@ def _title_for_event(event: str) -> str:
         ev.BACKTEST_FAILED: "Backtest failed",
         ev.BOT_ERROR: "Bot error",
         ev.DEPENDENCIES_DEGRADED: "Dependencies degraded",
+        ev.AGENTS_BRIEF: "Agents brief",
+        ev.AGENTS_ACTION: "Agents action",
     }.get(event, event)
 
 
@@ -35,11 +38,14 @@ class NotificationManager:
     def _throttle_key(self, event: str, payload: dict[str, Any]) -> str:
         if event in (
             ev.FUND_HALT,
+            ev.REBALANCE_ALERT,
             ev.CIRCUIT_TRIPPED,
             ev.BOT_ERROR,
             ev.DEPENDENCIES_DEGRADED,
             ev.BACKTEST_SUCCESS,
             ev.BACKTEST_FAILED,
+            ev.AGENTS_BRIEF,
+            ev.AGENTS_ACTION,
         ):
             return event
         sym = payload.get("symbol") or ""

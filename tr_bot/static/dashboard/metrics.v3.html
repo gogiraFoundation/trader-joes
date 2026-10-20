@@ -1,0 +1,195 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>tr_bot metrics v3</title>
+  <script src="/dashboard/vendor/tailwindcdn.js"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            surface: { DEFAULT: '#0a0e12', card: '#121820', border: '#1e2a38' },
+            accent: { DEFAULT: '#04c3fb', muted: '#64748b' }
+          },
+          fontFamily: {
+            sans: ['ui-sans-serif', 'system-ui', 'sans-serif'],
+            mono: ['ui-monospace', 'SFMono-Regular', 'Menlo', 'monospace']
+          }
+        }
+      }
+    };
+  </script>
+    <link rel="stylesheet" href="/dashboard/dashboard.css" />
+  <script src="/dashboard/vendor/chart.umd.min.js"></script>
+  <script src="/dashboard/js/common.js"></script>
+  <script src="/dashboard/js/metrics-core.js"></script>
+</head>
+<body class="bg-surface min-h-screen text-slate-100 font-sans antialiased">
+  <div id="auth-gate" class="hidden fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4">
+    <div class="bg-surface-card border border-surface-border rounded-xl p-6 max-w-md w-full shadow-xl">
+      <h2 class="text-lg font-semibold text-white mb-2">Dashboard token required</h2>
+      <p class="text-sm text-slate-400 mb-4">Enter the same <code class="text-accent">DASHBOARD_TOKEN</code> used by the main dashboard. Stored in session only.</p>
+      <input id="token-input" type="password" placeholder="Token" class="w-full rounded-lg bg-surface border border-surface-border px-3 py-2 text-sm mb-3 focus:outline-none focus:ring-2 focus:ring-accent" />
+      <button type="button" id="token-save" class="w-full rounded-lg bg-sky-600 hover:bg-sky-500 py-2 text-sm font-medium">Save &amp; load</button>
+    </div>
+  </div>
+
+  <div id="compare-modal" class="hidden fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4" role="dialog" aria-modal="true" aria-labelledby="compare-modal-title">
+    <div class="bg-surface-card border border-surface-border rounded-xl p-6 max-w-2xl w-full shadow-xl max-h-[85vh] overflow-y-auto">
+      <div class="flex items-start justify-between gap-4 mb-3">
+        <h2 id="compare-modal-title" class="text-lg font-semibold text-white">Legacy vs SMC compare</h2>
+        <button type="button" id="compare-modal-close" class="modal-close" aria-label="Close compare dialog">&times;</button>
+      </div>
+      <p id="compare-summary" class="text-sm text-slate-300 mb-3">—</p>
+      <p id="compare-go-no-go" class="text-sm mb-3">—</p>
+      <h3 class="text-xs font-medium uppercase tracking-wide text-slate-500 mb-1">Raw artifacts</h3>
+      <pre id="compare-json" class="text-xs text-slate-400 bg-surface/80 border border-surface-border rounded-lg p-3 overflow-x-auto whitespace-pre-wrap break-all">—</pre>
+    </div>
+  </div>
+
+  <div id="dashboard-header"></div>
+
+  <main class="max-w-7xl mx-auto px-4 py-6 space-y-6">
+    <p id="error-banner" class="hidden rounded-lg border border-red-500/50 bg-red-950/40 px-4 py-3 text-sm text-red-200"></p>
+
+    <section class="grid grid-cols-1 lg:grid-cols-12 gap-6">
+      <article class="lg:col-span-6 dash-panel">
+        <div class="flex items-start justify-between gap-4">
+          <div>
+            <h2 class="text-sm font-semibold text-white">NAV &amp; equity</h2>
+            <p id="nav-meta" class="text-xs text-slate-500 mt-1">Last 7 days · filtered display series</p>
+          </div>
+          <p id="nav-current" class="text-2xl font-semibold text-sky-300 tabular-nums">—</p>
+        </div>
+        <div class="mt-4 h-56 relative">
+          <p id="nav-empty" class="hidden absolute inset-0 flex items-center justify-center text-sm text-slate-500">No NAV samples yet</p>
+          <canvas id="chart-nav"></canvas>
+        </div>
+      </article>
+
+      <article class="lg:col-span-6 dash-panel">
+        <div class="flex items-start justify-between gap-4">
+          <div>
+            <h2 class="text-sm font-semibold text-white">Drawdown</h2>
+            <p id="dd-meta" class="text-xs text-slate-500 mt-1">Fund-peak anchored · max DD overlay</p>
+          </div>
+          <p id="dd-current" class="text-2xl font-semibold text-amber-400 tabular-nums">—</p>
+        </div>
+        <div class="mt-4 h-56 relative">
+          <p id="dd-empty" class="hidden absolute inset-0 flex items-center justify-center text-sm text-slate-500">No drawdown history yet</p>
+          <canvas id="chart-dd"></canvas>
+        </div>
+      </article>
+    </section>
+
+    <section class="dash-panel">
+      <div class="flex items-start justify-between gap-4">
+        <div>
+          <h2 class="text-sm font-semibold text-white">Trade activity</h2>
+          <p id="trades-meta" class="text-xs text-slate-500 mt-1">Daily closes · cumulative net P&amp;L (7d)</p>
+        </div>
+      </div>
+      <p id="trades-warn" class="hidden mt-2 text-xs text-amber-300"></p>
+      <div class="mt-4 h-56 relative">
+        <p id="trades-empty" class="hidden absolute inset-0 flex items-center justify-center text-sm text-slate-500">No closed trades in the last 7 days</p>
+        <canvas id="chart-trades"></canvas>
+      </div>
+    </section>
+
+    <section class="dash-panel overflow-x-auto">
+      <div class="flex items-start justify-between gap-4 mb-3">
+        <div>
+          <h2 class="text-sm font-semibold text-white">Rolling performance</h2>
+          <p class="text-xs text-slate-500 mt-1">From <code class="text-slate-400">pnl.recent_trades</code> (newest-first); win rate = net P&amp;L &gt; 0</p>
+        </div>
+        <p id="perf-sharpe" class="text-xs text-slate-400 max-w-xs text-right">—</p>
+      </div>
+      <table class="w-full text-sm text-left">
+        <thead class="text-xs uppercase tracking-wide text-slate-500">
+          <tr>
+            <th class="py-2 pr-3 font-medium">Window</th>
+            <th class="py-2 pr-3 font-medium">Win rate</th>
+            <th class="py-2 pr-3 font-medium">Profit factor</th>
+            <th class="py-2 pr-3 font-medium">Expectancy</th>
+            <th class="py-2 pr-3 font-medium">Avg win</th>
+            <th class="py-2 pr-3 font-medium">Avg loss</th>
+          </tr>
+        </thead>
+        <tbody id="perf-tbody" class="text-slate-200"></tbody>
+      </table>
+    </section>
+
+    <section class="grid grid-cols-1 lg:grid-cols-12 gap-6">
+      <article class="lg:col-span-4 dash-panel">
+        <h2 class="text-sm font-semibold text-white">Dependencies</h2>
+        <p class="text-xs leading-5 text-slate-500 mt-1">Latency thresholds: &lt;10 / 10–50 / &gt;50 ms</p>
+        <div class="mt-5 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-1 xl:grid-cols-2 gap-3">
+          <div data-sev-card class="rounded-lg border border-surface-border bg-surface/80 p-4">
+            <p class="text-xs font-medium uppercase tracking-wide text-slate-500">Redis</p>
+            <p id="deps-redis-val" class="mt-2 text-xl font-semibold tabular-nums text-slate-300">—</p>
+          </div>
+          <div data-sev-card class="rounded-lg border border-surface-border bg-surface/80 p-4">
+            <p class="text-xs font-medium uppercase tracking-wide text-slate-500">Postgres</p>
+            <p id="deps-pg-val" class="mt-2 text-xl font-semibold tabular-nums text-slate-300">—</p>
+          </div>
+        </div>
+        <div class="mt-6 h-28">
+          <canvas id="chart-deps"></canvas>
+        </div>
+      </article>
+
+      <article id="circuit-card" class="lg:col-span-4 dash-panel">
+        <h2 class="text-sm font-semibold text-white">Circuit &amp; limits</h2>
+        <p class="text-xs leading-5 text-slate-500 mt-1">Trades / circuit / pause</p>
+        <div class="mt-5 space-y-4">
+          <div class="rounded-lg border border-surface-border bg-surface/80 p-4">
+            <div class="flex items-center justify-between gap-4 text-sm text-slate-400 mb-3">
+              <span>Trades today</span>
+              <span id="circ-trades" class="font-mono text-slate-200">—</span>
+            </div>
+            <div class="h-2 rounded bg-slate-800 overflow-hidden">
+              <div id="circ-trades-bar" class="h-2 rounded bg-emerald-500" style="width:0%"></div>
+            </div>
+          </div>
+          <div class="grid grid-cols-2 gap-3">
+            <div class="rounded-lg border border-surface-border bg-surface/80 p-4">
+              <p class="text-xs text-slate-500">Circuit losses</p>
+              <p id="circ-count" class="mt-2 font-mono text-lg text-slate-200">—</p>
+            </div>
+            <div class="rounded-lg border border-surface-border bg-surface/80 p-4">
+              <p class="text-xs text-slate-500">Can trade</p>
+              <p id="circ-can-trade" class="mt-2 text-lg font-medium">—</p>
+            </div>
+          </div>
+          <p id="circ-pause" class="border-t border-surface-border pt-4 text-xs leading-5 text-slate-500">—</p>
+        </div>
+      </article>
+
+      <article class="lg:col-span-4 dash-panel">
+        <div class="flex items-start justify-between gap-4">
+          <div>
+            <h2 class="text-sm font-semibold text-white">Backtest summary</h2>
+            <p class="text-xs leading-5 text-slate-500 mt-1">Last run artifact</p>
+          </div>
+          <button type="button" id="bt-compare-open" class="shrink-0 rounded-lg bg-slate-700 hover:bg-slate-600 px-3 py-2 text-xs font-medium">View compare</button>
+        </div>
+        <dl class="mt-5 grid grid-cols-2 gap-3 text-sm">
+          <div class="rounded-lg border border-surface-border bg-surface/80 p-3"><dt class="text-xs text-slate-500">Return</dt><dd id="bt-ret" class="mt-2 font-mono text-base">—</dd></div>
+          <div class="rounded-lg border border-surface-border bg-surface/80 p-3"><dt class="text-xs text-slate-500">Max DD</dt><dd id="bt-dd" class="mt-2 font-mono text-base">—</dd></div>
+          <div class="rounded-lg border border-surface-border bg-surface/80 p-3"><dt class="text-xs text-slate-500">Trades</dt><dd id="bt-trades" class="mt-2 font-mono text-base">—</dd></div>
+          <div class="rounded-lg border border-surface-border bg-surface/80 p-3"><dt class="text-xs text-slate-500">W / L</dt><dd id="bt-wl" class="mt-2 font-mono text-base">—</dd></div>
+          <div class="rounded-lg border border-surface-border bg-surface/80 p-3"><dt class="text-xs text-slate-500">Profit factor</dt><dd id="bt-pf" class="mt-2 font-mono text-base">—</dd></div>
+          <div class="rounded-lg border border-surface-border bg-surface/80 p-3"><dt class="text-xs text-slate-500">Finished</dt><dd id="bt-finished" class="mt-2 font-mono text-xs leading-5 break-words">—</dd></div>
+        </dl>
+        <p id="bt-job" class="mt-4 border-t border-surface-border pt-4 text-xs leading-5 text-slate-500 break-all">Job: —</p>
+      </article>
+    </section>
+
+    <p id="refresh-note" class="text-xs text-slate-500 text-center">—</p>
+  </main>
+
+  <script src="/dashboard/js/metrics.js"></script>
+</body>
+</html>

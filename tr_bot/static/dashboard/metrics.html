@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>tr_bot metrics</title>
-  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="/dashboard/vendor/tailwindcdn.js"></script>
   <script>
     tailwind.config = {
       theme: {
@@ -13,18 +13,14 @@
             surface: { DEFAULT: '#0f1419', card: '#1a2332', border: '#2d3a4d' },
             accent: { DEFAULT: '#38bdf8', muted: '#64748b' }
           },
-          fontFamily: { sans: ['IBM Plex Sans', 'system-ui', 'sans-serif'] }
+          fontFamily: { sans: ['system-ui', 'sans-serif'] }
         }
       }
     };
   </script>
-  <link rel="preconnect" href="https://fonts.googleapis.com" />
-  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet" />
-  <style>
-    html, body { min-height: 100%; margin: 0; }
-    body { background-color: #0f1419; color: #e2e8f0; font-family: system-ui, sans-serif; }
-  </style>
-  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  <link rel="stylesheet" href="/dashboard/dashboard.css" />
+<script src="/dashboard/vendor/chart.umd.min.js"></script>
+  <script src="/dashboard/js/common.js"></script>
 </head>
 <body class="bg-surface min-h-screen text-slate-100 font-sans antialiased">
   <div id="auth-gate" class="hidden fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4">
@@ -36,20 +32,7 @@
     </div>
   </div>
 
-  <header class="border-b border-surface-border bg-surface-card/80 backdrop-blur">
-    <div class="max-w-6xl mx-auto px-4 py-6 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
-      <div>
-        <h1 class="text-2xl font-bold tracking-tight text-white">tr_bot</h1>
-        <p class="text-sm text-slate-400 mt-1">Metrics dashboard</p>
-      </div>
-      <div class="flex flex-wrap items-center gap-2">
-        <a href="/" class="px-3 py-1 rounded-full text-xs font-medium bg-slate-700 hover:bg-slate-600 text-slate-100">Main dashboard</a>
-        <span id="pill-status" class="px-3 py-1 rounded-full text-xs font-medium bg-slate-700">…</span>
-        <span id="pill-redis" class="px-3 py-1 rounded-full text-xs font-medium bg-slate-700">Redis</span>
-        <span id="pill-pg" class="px-3 py-1 rounded-full text-xs font-medium bg-slate-700">Postgres</span>
-      </div>
-    </div>
-  </header>
+  <div id="dashboard-header"></div>
 
   <main class="max-w-6xl mx-auto px-4 py-8 space-y-8">
     <p id="error-banner" class="hidden rounded-lg border border-red-500/50 bg-red-950/40 px-4 py-3 text-sm text-red-200"></p>
@@ -125,7 +108,7 @@
   </main>
 
   <script>
-    function $(id) { return document.getElementById(id); }
+    const $ = TRDashboard.$;
 
     function pill(el, ok, text) {
       if (!el) return;
@@ -432,22 +415,9 @@
     }
 
     async function loadSummaryOnce() {
-      const token = sessionStorage.getItem('dashboard_token');
-      const headers = {};
-      if (token) headers['Authorization'] = 'Bearer ' + token;
-      const r = await fetch('/api/dashboard/summary', { headers });
-      if (r.status === 401) {
-        $('auth-gate').classList.remove('hidden');
-        return;
-      }
-      $('auth-gate').classList.add('hidden');
-      if (!r.ok) {
-        $('error-banner').textContent = 'Failed to load: ' + r.status + ' ' + (await r.text());
-        $('error-banner').classList.remove('hidden');
-        return;
-      }
+      const data = await TRDashboard.fetchDashboardJson('/api/dashboard/summary');
+      if (data === null) return;
       $('error-banner').classList.add('hidden');
-      const data = await r.json();
 
       const dep = data.dependencies || {};
       const st = data.status;
@@ -472,29 +442,12 @@
       updateRollingCharts();
     }
 
-    const btn = $('token-save');
-    if (btn) {
-      btn.addEventListener('click', () => {
-        const v = $('token-input').value.trim();
-        if (v) sessionStorage.setItem('dashboard_token', v);
-        $('auth-gate').classList.add('hidden');
-        loadSummaryOnce();
-      });
-    }
-
-    async function safeLoad() {
-      try { await loadSummaryOnce(); }
-      catch (e) {
-        const b = $('error-banner');
-        b.textContent = 'Dashboard load error: ' + (e && e.message ? e.message : String(e));
-        b.classList.remove('hidden');
-      }
-    }
+    TRDashboard.mountHeader({ title: 'Diagnostics', subtitle: 'Metrics (v1)', showRedis: false, showMode: true });
+    TRDashboard.wireTokenGate(loadSummaryOnce);
 
     // Initial render of rolling charts from persisted local samples.
     updateRollingCharts();
-    safeLoad();
-    setInterval(safeLoad, 20000);
+    TRDashboard.startPolling(loadSummaryOnce, 20000);
   </script>
 </body>
 </html>

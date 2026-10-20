@@ -1,0 +1,278 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>tr_bot — Strategy &amp; promotion</title>
+  <script src="/dashboard/vendor/tailwindcdn.js"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            surface: { DEFAULT: '#0a0e12', card: '#121820', border: '#1e2a38' },
+            accent: { DEFAULT: '#04c3fb', muted: '#64748b' }
+          },
+          fontFamily: { sans: ['ui-sans-serif', 'system-ui', 'sans-serif'] }
+        }
+      }
+    };
+  </script>
+  <link rel="stylesheet" href="/dashboard/dashboard.css" />
+<script src="/dashboard/js/common.js"></script>
+</head>
+<body class="bg-surface min-h-screen text-slate-100 font-sans antialiased">
+  <div id="auth-gate" class="hidden fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4">
+    <div class="bg-surface-card border border-surface-border rounded-xl p-6 max-w-md w-full shadow-xl">
+      <h2 class="text-lg font-semibold text-white mb-2">Dashboard token required</h2>
+      <p class="text-sm text-slate-400 mb-4">Enter the same <code class="text-accent">DASHBOARD_TOKEN</code> as the main dashboard. Stored in session only.</p>
+      <input id="token-input" type="password" placeholder="Token" class="w-full rounded-lg bg-surface border border-surface-border px-3 py-2 text-sm mb-3 focus:outline-none focus:ring-2 focus:ring-accent" />
+      <button type="button" id="token-save" class="w-full rounded-lg bg-sky-600 hover:bg-sky-500 py-2 text-sm font-medium">Save &amp; reload</button>
+    </div>
+  </div>
+
+  <div id="dashboard-header"></div>
+
+  <main class="max-w-7xl mx-auto px-4 py-6 space-y-6">
+    <p id="error-banner" class="hidden rounded-lg border border-red-500/50 bg-red-950/40 px-4 py-3 text-sm text-red-200"></p>
+
+    <section class="rounded-xl border border-surface-border bg-surface-card p-6 shadow-lg">
+      <div class="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-4">
+        <div>
+          <h2 class="text-sm font-semibold text-white">Current state</h2>
+          <p id="headline" class="mt-2 text-lg text-slate-200">—</p>
+          <p id="eval-hash" class="text-xs text-slate-500 mt-2 font-mono break-all">—</p>
+        </div>
+        <p id="gate-pill" class="px-3 py-1 rounded-full text-xs font-medium bg-slate-700 self-start">—</p>
+      </div>
+    </section>
+
+    <section class="rounded-xl border border-surface-border bg-surface-card p-6 shadow-lg">
+      <h2 class="text-sm font-semibold text-white mb-4">Soak thresholds</h2>
+      <dl id="thresholds-dl" class="grid grid-cols-1 sm:grid-cols-2 gap-x-8 gap-y-2 text-sm"></dl>
+    </section>
+
+    <section class="rounded-xl border border-surface-border bg-surface-card p-6 shadow-lg">
+      <h2 class="text-sm font-semibold text-white mb-4">Gate outcomes (evaluate)</h2>
+      <p id="outcomes-empty" class="text-sm text-slate-500 hidden">No outcome data.</p>
+      <div id="outcomes-body" class="overflow-x-auto"></div>
+    </section>
+
+    <section class="rounded-xl border border-surface-border bg-surface-card p-6 shadow-lg">
+      <h2 class="text-sm font-semibold text-white mb-4">Deployment pointers</h2>
+      <div class="overflow-x-auto">
+        <table class="w-full text-sm">
+          <thead>
+            <tr class="border-b border-surface-border text-left text-xs uppercase tracking-wide text-slate-500">
+              <th class="py-2 pr-4">Tier</th>
+              <th class="py-2 pr-4">Profile</th>
+              <th class="py-2">Activated (UTC)</th>
+            </tr>
+          </thead>
+          <tbody id="pointer-rows"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="rounded-xl border border-surface-border bg-surface-card p-6 shadow-lg">
+      <h2 class="text-sm font-semibold text-white mb-4">Strategy engine / SMC</h2>
+      <dl id="engine-dl" class="grid grid-cols-1 sm:grid-cols-2 gap-x-8 gap-y-2 text-sm"></dl>
+      <p id="engine-go" class="mt-3 text-sm text-slate-400">—</p>
+    </section>
+
+    <section class="rounded-xl border border-surface-border bg-surface-card p-6 shadow-lg">
+      <div class="flex items-center justify-between gap-4 mb-4">
+        <h2 class="text-sm font-semibold text-white">Promotion log (recent)</h2>
+        <span class="text-xs text-slate-500">Newest last</span>
+      </div>
+      <p id="events-empty" class="text-sm text-slate-500">No events recorded yet.</p>
+      <div id="events-scroll" class="hidden max-h-96 overflow-y-auto space-y-3 pr-1"></div>
+    </section>
+
+    <footer class="text-xs text-slate-500">
+      <span id="refresh-note">Auto-refresh every 20s</span>
+      · <code class="text-slate-400">GET /api/dashboard/summary</code> → <code class="text-slate-400">strategy_promotion</code>
+    </footer>
+  </main>
+
+  <script>
+    const $ = TRDashboard.$;
+    const fmtUtc = TRDashboard.fmtUtc;
+
+    function pillStatus(data) {
+      TRDashboard.pillStatus('pill-status', data);
+    }
+
+    function renderThresholds(th) {
+      const dl = $('thresholds-dl');
+      if (!dl) return;
+      th = th || {};
+      const rows = [
+        ['min_trades', th.min_trades],
+        ['min_calendar_days', th.min_calendar_days],
+        ['max_equity_drawdown_pct', th.max_equity_drawdown_pct],
+        ['cooldown_hours', th.cooldown_hours],
+      ];
+      dl.innerHTML = rows.map(([k, v]) =>
+        '<div class="text-slate-500">' + k + '</div><div class="font-mono text-slate-200">' + (v != null ? String(v) : '—') + '</div>'
+      ).join('');
+    }
+
+    function renderOutcomes(ev) {
+      const empty = $('outcomes-empty');
+      const body = $('outcomes-body');
+      if (!body) return;
+      const outcomes = (ev && ev.outcomes) ? ev.outcomes : [];
+      if (!outcomes.length) {
+        empty.classList.remove('hidden');
+        body.innerHTML = '';
+        return;
+      }
+      empty.classList.add('hidden');
+      const sorted = outcomes.slice().sort((a, b) => {
+        const fa = a.passed === true ? 1 : 0;
+        const fb = b.passed === true ? 1 : 0;
+        return fa - fb;
+      });
+      let html = '<table class="w-full text-sm"><thead><tr class="border-b border-surface-border text-left text-xs text-slate-500">' +
+        '<th class="py-2 pr-3">Gate</th><th class="py-2 pr-3">Pass</th><th class="py-2">Detail</th></tr></thead><tbody>';
+      sorted.forEach((o) => {
+        const ok = o.passed === true;
+        html += '<tr class="border-b border-surface-border/40">' +
+          '<td class="py-2 pr-3 font-mono text-slate-200">' + (o.name || '—') + '</td>' +
+          '<td class="py-2 pr-3 ' + (ok ? 'text-emerald-400' : 'text-rose-300') + '">' + (ok ? 'yes' : 'no') + '</td>' +
+          '<td class="py-2 text-slate-400 break-words max-w-md">' + (o.detail != null ? String(o.detail) : '—') + '</td></tr>';
+      });
+      html += '</tbody></table>';
+      body.innerHTML = html;
+    }
+
+    function renderPointers(ptr) {
+      const tb = $('pointer-rows');
+      if (!tb) return;
+      ptr = ptr || {};
+      const tiers = ['paper', 'live_canary', 'live_full'];
+      tb.innerHTML = '';
+      tiers.forEach((t) => {
+        const p = ptr[t];
+        const tr = document.createElement('tr');
+        tr.className = 'border-b border-surface-border/50';
+        const pid = p && p.profile_id != null ? String(p.profile_id) : '—';
+        const act = p && p.activated_at ? fmtUtc(p.activated_at) : '—';
+        tr.innerHTML =
+          '<td class="py-2 pr-4 font-mono text-slate-300">' + t + '</td>' +
+          '<td class="py-2 pr-4 font-mono text-slate-200">' + pid + '</td>' +
+          '<td class="py-2 text-slate-400 text-xs">' + act + '</td>';
+        tb.appendChild(tr);
+      });
+    }
+
+    function renderEvents(events) {
+      const scroll = $('events-scroll');
+      const empty = $('events-empty');
+      if (!scroll || !empty) return;
+      if (!events || !events.length) {
+        empty.classList.remove('hidden');
+        scroll.classList.add('hidden');
+        scroll.innerHTML = '';
+        return;
+      }
+      empty.classList.add('hidden');
+      scroll.classList.remove('hidden');
+      scroll.innerHTML = '';
+      events.forEach((row) => {
+        const utc = row.utc || row.time || '';
+        const action = row.action != null ? String(row.action) : '—';
+        const passed = row.passed;
+        const passStr = passed === true ? 'ok' : (passed === false ? 'fail' : '—');
+        const div = document.createElement('div');
+        div.className = 'rounded-lg border border-surface-border/60 bg-surface/80 p-3 text-xs';
+        const head = document.createElement('div');
+        head.className = 'flex flex-wrap gap-2 items-baseline mb-2';
+        head.innerHTML =
+          '<span class="text-slate-500">' + fmtUtc(utc) + '</span>' +
+          '<span class="font-mono text-accent">' + action + '</span>' +
+          '<span class="' + (passed === true ? 'text-emerald-400' : passed === false ? 'text-rose-300' : 'text-slate-500') + '">' + passStr + '</span>';
+        div.appendChild(head);
+        const pre = document.createElement('pre');
+        pre.className = 'text-slate-400 whitespace-pre-wrap break-all font-mono text-[11px] leading-relaxed mt-1';
+        try {
+          pre.textContent = JSON.stringify(row, null, 2);
+        } catch (e) {
+          pre.textContent = String(row);
+        }
+        div.appendChild(pre);
+        scroll.appendChild(div);
+      });
+    }
+
+    function render(data) {
+      $('error-banner').classList.add('hidden');
+      pillStatus(data);
+      const sp = data.strategy_promotion || {};
+      const ev = sp.last_evaluate || {};
+      const tier = sp.deployment_tier || '—';
+      const prof = sp.active_strategy_profile_id || '—';
+      const frozen = sp.promotions_frozen ? 'yes' : 'no';
+      let gate = '—';
+      if (ev.passed === true) gate = 'all pass';
+      else if (ev.passed === false) gate = 'some failed';
+      const hl = $('headline');
+      if (hl) {
+        hl.textContent = 'Tier ' + tier + ' · profile ' + prof + ' · promotions frozen ' + frozen + ' · gates ' + gate;
+      }
+      const hash = $('eval-hash');
+      if (hash) {
+        hash.textContent = ev.input_hash ? 'input_hash: ' + ev.input_hash : '';
+      }
+      const pill = $('gate-pill');
+      if (pill) {
+        if (ev.passed === true) {
+          pill.textContent = 'Evaluate: pass';
+          pill.className = 'px-3 py-1 rounded-full text-xs font-medium bg-emerald-900/60 text-emerald-300 self-start';
+        } else if (ev.passed === false) {
+          pill.textContent = 'Evaluate: fail';
+          pill.className = 'px-3 py-1 rounded-full text-xs font-medium bg-rose-900/60 text-rose-200 self-start';
+        } else {
+          pill.textContent = 'Evaluate: —';
+          pill.className = 'px-3 py-1 rounded-full text-xs font-medium bg-slate-700 self-start';
+        }
+      }
+      renderThresholds(sp.thresholds);
+      renderOutcomes(ev);
+      renderPointers(sp.pointers);
+      renderEvents(sp.last_promotion_events);
+      const eng = data.strategy_engine_status || {};
+      const edl = $('engine-dl');
+      if (edl) {
+        const rows = [
+          ['strategy_engine', eng.strategy_engine],
+          ['exit_mode', eng.exit_mode],
+          ['smc_min_trade_score', eng.smc_min_trade_score],
+          ['shadow_agreement', eng.shadow_agreement ? JSON.stringify(eng.shadow_agreement) : '—'],
+        ];
+        edl.innerHTML = rows.map(([k, v]) =>
+          '<div class="text-slate-500">' + k + '</div><div class="font-mono text-slate-200">' + (v != null ? String(v) : '—') + '</div>'
+        ).join('');
+      }
+      const eg = $('engine-go');
+      if (eg) {
+        const go = eng.smc_go_no_go || {};
+        eg.textContent = go.passed != null
+          ? ('SMC go/no-go: ' + (go.passed ? 'PASS' : 'FAIL') + ' — ' + ((go.reasons || []).join('; ') || '—'))
+          : 'SMC go/no-go: no artifact yet (run backtest-compare)';
+      }
+    }
+
+    async function loadSummary() {
+      const data = await TRDashboard.fetchDashboardJson('/api/dashboard/summary?sections=' + encodeURIComponent('strategy_promotion,strategy_engine_status,config'));
+      if (data === null) return;
+      render(data);
+    }
+
+    TRDashboard.mountHeader({ title: 'Strategy & promotion', subtitle: 'Gates, pointers, and engine status', showRedis: false, showMode: false });
+    TRDashboard.wireTokenGate(loadSummary);
+    TRDashboard.startPolling(loadSummary, 20000);
+  </script>
+</body>
+</html>

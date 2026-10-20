@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from tr_bot.startup import pipeline
+from tr_bot.strategy import deployment_io as dep
+from tr_bot.strategy.profile import build_profile_document
 
 # Isolated startup pipeline tests must not depend on workspace artifacts/training/last_run.json.
 _PASSING_TRAIN_LAST_RUN = {
@@ -43,8 +45,8 @@ def test_backtest_gate_fails_when_threshold_not_met(monkeypatch):
     assert out["checks"]["min_trades"] is False
 
 
-def test_backtest_gate_builtin_defaults_allow_zero_trades(monkeypatch):
-    """Default min_trades=0: no-fill walk-forward (e.g. strict profile) does not block startup."""
+def test_backtest_gate_builtin_defaults_require_min_trades(monkeypatch):
+    """Default min_trades=3: zero-trade walk-forward does not pass startup gate."""
     for key in (
         "STARTUP_BACKTEST_MIN_RETURN_PCT",
         "STARTUP_BACKTEST_MAX_DD_PCT",
@@ -53,7 +55,7 @@ def test_backtest_gate_builtin_defaults_allow_zero_trades(monkeypatch):
         monkeypatch.delenv(key, raising=False)
     assert pipeline.evaluate_backtest_gate(
         {"total_return_pct": 0.0, "max_drawdown_pct": 0.0, "trades": 0}
-    )["passed"] is True
+    )["passed"] is False
     assert pipeline.evaluate_backtest_gate(
         {"total_return_pct": 3.0, "max_drawdown_pct": 5.0, "trades": 3}
     )["passed"] is True
@@ -240,11 +242,12 @@ def test_tuning_stability_top_is_forwarded(monkeypatch):
     assert seen["args"][idx + 1] == "2"
 
 
-def test_active_strategy_profile_id_after_tune_when_register_succeeds(monkeypatch):
+def test_active_strategy_profile_id_after_tune_when_register_succeeds(monkeypatch, tmp_path):
     import subprocess
     import sys
 
     monkeypatch.setenv("STARTUP_RUN_TUNING", "true")
+    monkeypatch.setattr(pipeline.config, "ARTIFACTS_DIR", str(tmp_path))
     monkeypatch.setattr(
         pipeline,
         "run_preflight_checks",
@@ -256,16 +259,19 @@ def test_active_strategy_profile_id_after_tune_when_register_succeeds(monkeypatc
     )
 
     emitted = "sweep_after_tune"
+    doc = build_profile_document(emitted, {"RISK_PER_TRADE": 0.01})
+    dep.deployment_dir(tmp_path)
+    dep.atomic_write_json(dep.strategy_profile_path(tmp_path, emitted), doc)
 
-    def fake_register(pid: str) -> dict:
-        return {"profile_id": pid, "activated_at": "t", "source": "startup_tuning"}
+    def fake_isolated(pid, pkg, timeout_s):
+        return {"total_return_pct": 1.0, "max_drawdown_pct": 5.0, "trades": 5}, None
 
-    monkeypatch.setattr(pipeline, "_register_profile_to_paper", fake_register)
+    monkeypatch.setattr(pipeline, "run_isolated_backtest_for_packaged_profile", fake_isolated)
 
     def fake_cmd(args, timeout_s=None, extra_env=None):
         joined = " ".join(str(a) for a in args)
         if "sweep_best_fit_settings.py" in joined:
-            line = f"Emitted strategy profile: /x/artifacts/strategy_profiles/{emitted}.json\n"
+            line = f"Emitted strategy profile: {tmp_path}/strategy_profiles/{emitted}.json\n"
             return subprocess.CompletedProcess(args=args, returncode=0, stdout=line, stderr="")
         if "backtest-run" in joined:
             return subprocess.CompletedProcess(args=args, returncode=0, stdout="", stderr="")
@@ -277,15 +283,10 @@ def test_active_strategy_profile_id_after_tune_when_register_succeeds(monkeypatc
         "read_backtest_last_run",
         lambda: {"total_return_pct": 1.0, "max_drawdown_pct": 5.0, "trades": 3},
     )
-    monkeypatch.setattr(
-        pipeline.dep,
-        "read_pointer",
-        lambda root, tier: {"profile_id": emitted, "activated_at": "t", "source": "test"},
-    )
     out = pipeline.run_startup_pipeline(sys.executable)
     assert out["ok"] is True
     assert out["stages"]["preflight"]["active_strategy_profile_id"] == "before_tune"
     assert (
-        out["stages"]["preflight"]["active_strategy_profile_id_after_tune"] == emitted
+        out["stages"]["preflight"].get("active_strategy_profile_id_after_tune") == emitted
     )
     assert out.get("active_strategy_profile_id_effective") == emitted

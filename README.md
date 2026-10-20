@@ -1,8 +1,10 @@
 # tr_bot
 
-Python trading stack that combines **market regime detection** (scikit-learn), **mean reversion and optional trend signals**, **risk controls**, and **optional LLM sentiment** as a veto-only filter—not as a primary signal. Execution targets **Binance spot** via **ccxt** with **paper trading** by default. A **FastAPI** app serves health checks, a dashboard, and JSON summaries over artifacts under `ARTIFACTS_DIR` (default `artifacts/`).
+Python trading stack for **Binance spot** (via **ccxt**) with **paper trading by default**. The loop combines **ML regime detection**, **legacy mean-reversion / optional trend signals** or an optional **SMC (smart-money concepts) pipeline** with HIATP-style scoring, **risk controls** (including session / volatility / correlation size adjusters), and **optional LLM sentiment as a veto only** (never a primary signal). Advisory **Supervisor / Fund Manager** agents may pause, notify, or propose profile changes — they never call `execute_trade`.
 
-This repository is for **research and operations**: validate behavior in paper mode and read the [disclaimer](#disclaimer) before live use.
+A **FastAPI** app serves health checks, a dashboard (v1/v2), and JSON summaries over artifacts under `ARTIFACTS_DIR` (default `artifacts/`). Homelab deploy is Compose + LAN-only dashboard (`trbot.lan`); do not expose the bot to the public internet.
+
+This repository is for **research and operations**: validate in paper mode (fee/R soak first) and read the [disclaimer](#disclaimer) before live use. For module ownership and invariants when changing code, see [`skills.md`](skills.md). Operator preferences learned across sessions: [`AGENTS.md`](AGENTS.md).
 
 ## Table of contents
 
@@ -20,23 +22,29 @@ This repository is for **research and operations**: validate behavior in paper m
 
 ## Overview
 
-- **Loop:** `python -m tr_bot` runs `tr_bot.engine.run_forever` on a poll interval (`POLL_SECONDS`).
-- **Bootstrap:** [`start.sh`](start.sh) creates `.venv`, installs [`requirements.txt`](requirements.txt), copies [`.env.example`](.env.example) to `.env` when missing, and starts the bot, API, or full startup pipeline.
-- **Offline tooling:** `python -m tr_bot.managers` for training, backtests, fund snapshots, strategy promotion, and more ([`docs/cli.md`](docs/cli.md)).
+- **Loop:** `python -m tr_bot` runs `tr_bot.engine.run_forever` on `POLL_SECONDS`.
+- **Strategy engines** (`STRATEGY_ENGINE`):
+  - `legacy` (default) — regime + RSI/EMA mean reversion; trend only if `TREND_STRATEGY_ENABLED=true`.
+  - `smc` — multi-TF SMC signal pipeline + HIATP-style composite scoring (`tr_bot/strategy/signal_pipeline.py`, `scoring.py`).
+  - `shadow` — trade legacy; evaluate SMC in parallel and log dual views in the decision audit.
+- **Sizing adjusters:** `RiskManager.effective_risk_multiplier` combines correlation penalty with `market_session` and `volatility_regime` factors (clamped).
+- **Exits:** `ExitCoordinator` is the sole closer; software-polled stops by default (`EXIT_POLICY=software_polled`). Inter-poll checks via `EXIT_WATCHDOG_INTERVAL_S`. `exchange_native` remains rejected until `protective_reconcile` is fully wired.
+- **Processes (keep separate):** trading loop · API (`tr_bot.health:app`) · scheduler · optional CoinDesk poller (`python -m tr_bot.coindesk`). None substitutes for another.
+- **Bootstrap:** [`start.sh`](start.sh) creates `.venv`, installs [`requirements.txt`](requirements.txt), copies [`.env.example`](.env.example) → `.env` when missing, and starts bot / API / full pipeline.
+- **Offline tooling:** `python -m tr_bot.managers` for training, backtests, promotion, rebalance, agents, research ([`docs/cli.md`](docs/cli.md)). Fee/R universe bake-off: `scripts/compare_fee_r_universes.py`.
 
 ## Requirements
 
-- **Python 3.12+** (matches [`Dockerfile`](Dockerfile); local development may use 3.13 if your venv does).
+- **Python 3.12+** (matches [`Dockerfile`](Dockerfile); local development may use 3.13).
 - **bash** for `start.sh` / `stop.sh`.
 - Network access for market data (exchange, Yahoo, optional CoinMarketCap / CoinDesk APIs).
-- **Redis** and **PostgreSQL** are optional unless you configure `REDIS_URL`, `DATABASE_URL`, or features that require them (defaults are in [`.env.example`](.env.example)).
+- **Redis** and **PostgreSQL** are optional unless you set `REDIS_URL`, `DATABASE_URL`, or features that need them (see [`.env.example`](.env.example)).
 
 ## Installation
 
 1. Clone the repository and change into the project root.
-2. Run `./start.sh --help` to confirm script options, or start directly:
-   - On first run, `start.sh` creates `.venv`, runs `pip install -r requirements.txt`, and copies `.env` from `.env.example` if `.env` is missing.
-3. Edit **`.env`** for secrets (`BINANCE_*`, `OPENAI_API_KEY`, `CMC_API_KEY`, etc.) and trading settings before production use.
+2. Run `./start.sh --help`, or start directly — on first run, `start.sh` creates `.venv`, installs deps, and copies `.env` from `.env.example` if missing.
+3. Edit **`.env`** for secrets (`BINANCE_*`, `OPENAI_API_KEY`, `CMC_API_KEY`, etc.) and trading settings before any live use.
 
 **Manual setup (optional):**
 
@@ -50,467 +58,312 @@ cp .env.example .env
 
 | Mode | Command | Purpose |
 |------|---------|---------|
-| Trading loop (default) | `./start.sh` or `./start.sh --bot` | Runs `python -m tr_bot` (foreground). |
-| API / dashboard | `./start.sh --api` | **uvicorn** on `tr_bot.health:app` — dashboard UI, `/health`, `/docs`, `/api/dashboard/...`. Bind via `API_HOST` / `API_PORT` (defaults `0.0.0.0` / `8080`). |
-| Full stack | `./start.sh --all` | When `STARTUP_AUTOMATION_ENABLED` is true: runs the startup pipeline (preflight → training → tuning → backtest gate), then API (and optionally scheduler) in the background and the **trading loop in the foreground**. |
-| Scheduler only | `./start.sh --scheduler` | Periodic training/backtest/promotion per `SCHEDULER_*` in `.env`; does **not** replace the trading loop. |
+| Trading loop (default) | `./start.sh` or `./start.sh --bot` | `python -m tr_bot` (foreground). |
+| API / dashboard | `./start.sh --api` | **uvicorn** on `tr_bot.health:app` — UI, `/health`, `/docs`, `/api/dashboard/...`. Bind via `API_HOST` / `API_PORT` (defaults `0.0.0.0` / `8080`). |
+| Full stack | `./start.sh --all` | When `STARTUP_AUTOMATION_ENABLED` is true (default): hard-block pipeline (preflight → train → tune → backtest gate), then API + optional scheduler in the background and the **trading loop in the foreground**. |
+| Scheduler only | `./start.sh --scheduler` | Periodic train / backtest / adaptation / agents / reports per `SCHEDULER_*`; does **not** replace the trading loop. |
+| CoinDesk poller | `python -m tr_bot.coindesk` | Optional tick/OHLCV ingest; not started by `--all`. |
 
 Stop locally with [`./stop.sh`](stop.sh).
 
-**Operations:** paper vs live, hard-block startup stages (`STARTUP_*`), CoinMarketCap and training gates, adaptation, Postgres decision log, and troubleshooting are covered in [`docs/operations.md`](docs/operations.md).
+**Paper soak first:** align `TIMEFRAME`/`TRAIN_TIMEFRAME` (fee/R: `1h`), retail BNB fee path, `MIN_ATR_PCT`, `MAX_OPEN_POSITIONS=1`, then promote only after soak gates. Details: [`docs/operations.md`](docs/operations.md#feer-soak-1h--costs--single-open).
+
+**Ops runbook:** paper vs live, hard-block stages, agents, rebalancer, CoinDesk/CMC, and troubleshooting → [`docs/operations.md`](docs/operations.md). Homelab Compose + Pi nginx LAN access are documented there as well.
 
 ## Configuration
 
-All knobs live in **`.env`**; [`.env.example`](.env.example) is the authoritative list. Grouped at a high level:
+All knobs live in **`.env`**; [`.env.example`](.env.example) is authoritative. High-level groups:
 
-- **Trading:** `SYMBOL`, `TIMEFRAME`, `POLL_SECONDS`, `PAPER_TRADING`, Binance keys, fees/slippage, execution style.
-- **Risk and limits:** `RISK_PER_TRADE`, `MAX_TRADES_PER_DAY`, `MAX_DRAWDOWN_PCT`, circuit breaker, portfolio/canary tiers.
-- **LLM:** `USE_LLM`, provider URLs, model, timeouts, confidence floor.
-- **Training / backtest:** `TRAIN_*`, `BACKTEST_*`, `TRAIN_SOURCES`, Yahoo and exchange training symbols, optional CMC and CoinDesk settings.
-- **Startup / scheduler:** `STARTUP_*`, `SCHEDULER_*`, `STARTUP_HARD_BLOCK`, automation toggles.
-- **Infra:** `REDIS_URL`, `DATABASE_URL`, `ARTIFACTS_DIR`, dashboard token, notifications.
+| Group | Examples |
+|-------|----------|
+| Trading | `SYMBOL`, `TIMEFRAME`, `POLL_SECONDS`, `PAPER_TRADING`, `DEPLOYMENT_TIER`, Binance keys |
+| Strategy | `STRATEGY_ENGINE`, `EXIT_MODE`, `SMC_*`, RSI/ADX, `TREND_STRATEGY_ENABLED` |
+| Risk | `RISK_PER_TRADE`, `MAX_TRADES_PER_DAY`, `MAX_OPEN_POSITIONS`, `MAX_DRAWDOWN_PCT`, circuit, canary caps, `MIN_ATR_PCT`, `PAPER_MAX_NOTIONAL_USDT` |
+| Exits | `EXIT_POLICY` (`software_polled`; `exchange_native` rejected until reconcile is ready), `EXIT_WATCHDOG_INTERVAL_S` |
+| Fees | `LIVE_FEE_*`, `BACKTEST_*`, BNB retail taker defaults (`LIVE_FEE_BPS=0` to use them) |
+| LLM / agents | `USE_LLM`, model URLs, `AGENTS_*` (dry-run and mutating flags default off) |
+| Training / backtest | `TRAIN_*` (prefer `TRAIN_SOURCES=exchange` + `TRAIN_TIMEFRAME` = live TF), `BACKTEST_*` |
+| Startup / scheduler | `STARTUP_*` (example sets `STARTUP_TUNING_LIMIT=0`, `STARTUP_BACKTEST_MIN_TRADES=20`), `SCHEDULER_*`, `ADAPTATION_*` |
+| Promotion | `PROMOTION_*` (example: `min_trades=50`, `min_calendar_days=14`, `min_profit_factor=1.15`, comparator required) |
+| Rebalancer | `REBALANCER_*`, `LAG_*`, `REBALANCE_*` |
+| Infra | `REDIS_URL`, `DATABASE_URL`, `ARTIFACTS_DIR`, `DASHBOARD_*` (writes off by default), notifications, optional CMC / CoinDesk |
+
+Code defaults can be looser than [`.env.example`](.env.example) (e.g. startup min trades **3** in code vs **20** in the example). Prefer the example for paper soak.
 
 ## Docker
 
-[`docker-compose.yml`](docker-compose.yml) defines **redis** (6379), **db** (Timescale/Postgres image; host port **5433** → container 5432), **api** (uvicorn on 8080), and **bot** (`python -m tr_bot`). Both app services mount a shared volume for `ARTIFACTS_DIR` so snapshots and ledger data survive restarts.
+[`docker-compose.yml`](docker-compose.yml) defines:
 
-Examples:
+| Service | Role |
+|---------|------|
+| `redis` / `db` | Shared deps (Timescale/Postgres; persisted volume) |
+| `startup` | One-shot hard-block pipeline; bot waits for success |
+| `api` | Dashboard + health (`API_PUBLISH` / `API_PORT`, default host `0.0.0.0:8080`) |
+| `bot` | Trading loop after startup exits 0 |
+| `scheduler` | Periodic offline jobs |
+
+Entry point is [`scripts/supervise.sh`](scripts/supervise.sh) (`startup` \| `api` \| `bot` \| `scheduler`). App services share the `tr_bot_artifacts` volume for `ARTIFACTS_DIR`. The [`Dockerfile`](Dockerfile) uses **Python 3.12-slim**.
 
 ```bash
-docker compose up -d redis db
-docker compose up -d bot
-docker compose up -d api bot
+docker compose up -d --build
+docker compose logs -f startup   # first pipeline can take many minutes
+docker compose ps
 ```
 
-Override secrets and symbols with Compose `environment` or an env file; never commit API keys. The [`Dockerfile`](Dockerfile) uses **Python 3.12-slim** and copies the `tr_bot` package plus `requirements.txt`.
+Override secrets via `.env`; never commit API keys. Homelab sync and Pi-hole + nginx LAN path: [`docs/operations.md`](docs/operations.md).
 
 ## Testing
 
-From the repository root (with dev dependencies installed from `requirements.txt`):
-
 ```bash
 .venv/bin/pytest tests/
+# Frontend pure helpers (Node):
+node --test tests/frontend/metrics-core.test.js tests/frontend/overview-core.test.js
 ```
 
-The suite covers training pipelines, startup preflight, dashboard helpers, signals, backtests, and related modules.
+The suite covers engine gates, exits, SMC/scoring, agents, promotion, dashboard, training, startup, and related modules. Type-check config: [`pyrightconfig.json`](pyrightconfig.json).
 
 ## Project layout
 
 | Path | Role |
 |------|------|
-| `tr_bot/` | Application package (engine, config, execution, training, backtest, dashboard API, CoinDesk/CMC clients, startup pipeline, scheduler). |
-| `tests/` | `pytest` regression tests. |
-| `scripts/` | Operational scripts (e.g. sweep / tuning helpers). |
-| `docs/` | Runbooks and feature guides (operations, CLI, dashboard, CoinDesk). |
-| `artifacts/` | Runtime outputs (models, JSON state, ledgers, deployment pointers); contents depend on `.env` and are often gitignored. |
+| `tr_bot/` | Application package |
+| `tests/` | `pytest` (+ frontend Node tests under `tests/frontend/`) |
+| `scripts/` | `supervise.sh`, fee/R bake-off, sweep/tuning, SQL, ops helpers |
+| `docs/` | Runbooks (operations, CLI, dashboard, promotion, CoinDesk) |
+| `skills.md` | Agent handbook: module ownership, invariants, tests |
+| `AGENTS.md` | Learned operator preferences and workspace facts |
+| `.cursor/skills/` | Cursor skills that mirror domain standards |
+| `artifacts/` | Runtime outputs (often gitignored); do not commit secrets or live state |
+| `deploy/pi/` | Example nginx config for LAN hostname (`trbot.lan`) |
 
-### Code map (selected modules)
+### Code map (selected)
 
 | Area | Module(s) |
 |------|-----------|
 | Main loop | `tr_bot/engine.py` (`run_forever`) |
-| Config / tier floors | `tr_bot/config.py` (`effective_tier_overrides()`, `DEPLOYMENT_TIER`, `_apply_tier_minimums`) |
-| Indicators | `tr_bot/indicators.py` |
-| Regime ML | `tr_bot/regime.py` |
-| Signals & TA filters | `tr_bot/signals.py`, `tr_bot/ta_extended.py` |
-| Decision aggregation | `tr_bot/decision.py` |
-| Risk & sizing | `tr_bot/risk.py` |
-| Positions, ATR exits | `tr_bot/position.py` |
-| Orders | `tr_bot/execution.py` |
-| Circuit breaker | `tr_bot/circuit_breaker.py` |
-| Fund / NAV halt | `tr_bot/managers/fund.py` |
-| Walk-forward backtest | `tr_bot/backtest/runner.py` |
-| Startup pipeline | `tr_bot/startup/pipeline.py`, `tr_bot/startup/preflight.py` |
-| Offline training | `tr_bot/training/pipeline.py` |
-| Dashboard API | `tr_bot/dashboard_api.py`, `tr_bot/dashboard_pnl.py` |
-| Promotion gates | `tr_bot/promotion/gates.py` |
+| Config / tiers / runtime gates | `tr_bot/config.py`, `tr_bot/runtime_validation.py` |
+| Indicators / regime / signals | `tr_bot/indicators.py`, `regime.py`, `signals.py`, `decision.py` |
+| SMC + HIATP scoring | `tr_bot/smc/`, `strategy/signal_pipeline.py`, `scoring.py`, `explainability.py` |
+| Entry gates | `tr_bot/strategy/entry_gates.py`, `tier.py` |
+| Session / vol / correlation | `market_session.py`, `volatility_regime.py`, `correlation.py` |
+| Exits | `exit_plan.py`, `exit_coordinator.py`, `exit_watchdog.py`, `position.py`, `protective_reconcile.py` |
+| Orders / fills | `tr_bot/execution.py`, `trade_ledger.py` |
+| Risk / circuit / fund | `risk.py`, `circuit_breaker.py`, `managers/fund.py` |
+| Rebalancer | `managers/rebalancer.py` |
+| Agents (advisory) | `tr_bot/agents/` |
+| Research queries | `tr_bot/research/` |
+| Training / backtest / replay | `training/`, `backtest/runner.py`, `replay.py` |
+| Promotion | `tr_bot/promotion/` |
+| Startup / scheduler | `startup/pipeline.py`, `scheduler.py` |
+| CoinDesk | `tr_bot/coindesk/`, `db/coindesk_repo.py` |
+| Dashboard | `health.py`, `dashboard_api.py`, `dashboard_actions.py`, `dashboard_alerts.py`, `dashboard_jobs.py`, `static/dashboard/` |
 
 ## Documentation
 
-- [`docs/dashboard.md`](docs/dashboard.md) — Dashboard sections, P&L payload, data sources, ledger.
-- [`docs/cli.md`](docs/cli.md) — `python -m tr_bot.managers` (`train-run`, `backtest-run`, `--compact`, strategy commands).
-- [`docs/operations.md`](docs/operations.md) — Start/stop, `--all` pipeline, paper vs live, training gates, CMC, adaptation, troubleshooting.
+- [`skills.md`](skills.md) — Agent handbook (invariants, module ownership, tests).
+- [`AGENTS.md`](AGENTS.md) — Learned preferences and deploy facts.
 - [`docs/README.md`](docs/README.md) — Documentation index.
-- [`docs/coindesk_reference.md`](docs/coindesk_reference.md), [`docs/coindesk_asset_catalog.md`](docs/coindesk_asset_catalog.md) — CoinDesk integration notes.
+- [`docs/operations.md`](docs/operations.md) — Day-2 runbook, Compose, paper/live, fee/R soak, agents, rebalancer, CMC/CoinDesk.
+- [`docs/dashboard.md`](docs/dashboard.md) — Summary API, alerts, writes, v1/v2 UI, P&L.
+- [`docs/cli.md`](docs/cli.md) — `python -m tr_bot.managers` commands.
+- [`docs/strategy_promotion.md`](docs/strategy_promotion.md) — Profiles, tiers, gates, promote/revert, comparator.
+- [`docs/coindesk_reference.md`](docs/coindesk_reference.md), [`docs/coindesk_asset_catalog.md`](docs/coindesk_asset_catalog.md) — CoinDesk notes.
 
 ---
 
 ## Design and strategy reference
 
-The sections below are a **technical specification** for the strategy and architecture. **Inline Python examples illustrate concepts**; they are not guaranteed to match imports or function names in the runnable tree—use the `tr_bot/` package as the source of truth.
+The sections below are a **technical specification**. **Inline Python examples illustrate concepts**; they are not guaranteed to match imports or function names—use the `tr_bot/` package and [`skills.md`](skills.md) as the source of truth. Illustrative win-rate / profit-factor ranges are **research targets**, not guarantees or acceptance criteria.
 
-### 1. Core principle for high win rate
-
-Most retail AI bots fail because they attempt to predict market direction directly. Profitable strategies instead follow a **hierarchy of decisions**:
+### 1. Decision hierarchy
 
 ```
 Market Data
     ↓
-Regime Detection (ML)      →  Determines when strategy works
+Regime Detection (ML)           →  When mean reversion / trend is allowed (legacy)
     ↓
-Signal Generation (statistical) →  High-probability setups
+Signal path
+  · legacy: statistical MR / optional trend
+  · smc: multi-TF structure, liquidity, OB/FVG, score
+  · shadow: trade legacy + log SMC view
     ↓
-Risk Filter                 →  Protects capital
+Entry gates (confidence, TA, ATR floor, caps, circuit, halt, …)
     ↓
-LLM Context (optional)     →  Confirms sentiment
+LLM sentiment (optional)        →  Veto only (bullish / bearish / neutral)
     ↓
-Trade Execution
+Sizing + execution
+    ↓
+ExitCoordinator (+ watchdog between polls)
 ```
 
-**Key insight:** Mean reversion strategies achieve 60–75% win rates **only in range-bound markets**. The bot emphasizes trading when the regime model detects a **range** regime. LLMs filter trades that conflict with recent news sentiment; they do not generate the primary signal.
+**Key insight:** Mean reversion works primarily in **range** regimes. LLMs and advisory agents filter or operate risk controls; they do not generate the primary entry side.
 
-### 2. Strategy design targeting 65–72% win rate
+### 2. Strategy engines
 
-A high win rate is achieved by focusing on **mean reversion setups** rather than trend prediction. Common high-probability setups:
+| `STRATEGY_ENGINE` | Behavior |
+|-------------------|----------|
+| `legacy` | Range → `mean_reversion_signal`; trend → `trend_continuation_signal` only if `TREND_STRATEGY_ENABLED=true`. Sentiment vetoes apply. |
+| `smc` | Entries from `signal_pipeline` + HIATP-style `scoring` (min score / factor count via `SMC_*`). |
+| `shadow` | Submits legacy decisions only; SMC evaluation is audit/compare evidence. |
 
-| Strategy              | Win rate range |
-|-----------------------|----------------|
-| RSI mean reversion    | 60–72%         |
-| VWAP reversion        | 65–75%         |
-| Liquidity sweep reversal | 62–70%     |
-
-**Example setup – RSI mean reversion**
-
-- **Buy conditions:** RSI < 30, price near support (below 20‑period EMA), volume spike, ATR not extreme.
-- **Sell conditions:** RSI > 70, price near resistance (above 20‑period EMA), volume spike.
-
-These conditions are backtested on liquid assets (BTC, ETH, SPY, AAPL) in research configurations.
+**HIATP (in this repo)** means the SMC scoring weights, explainability records (`hiatp-1`), and risk size adjusters — not a separate engine flag. Kill switch back to the production path: set `STRATEGY_ENGINE=legacy` (plus halt / promotion freeze as needed). Offline compare: `python -m tr_bot.managers backtest-compare` → `artifacts/training/backtest_compare.json` and `artifacts/research/smc_go_no_go.json`.
 
 ### 3. System architecture overview
 
 ```
 +------------------+     +-----------------------+     +------------------+
-| Market Data      | --> | Feature Engineering   | --> | ML Regime        |
-| Service          |     | (Indicators)          |     | Detection        |
+| Market Data      | --> | Indicators / multi-TF | --> | Regime + SMC     |
+| (ccxt / Yahoo /  |     |                       |     | detectors        |
+|  optional CMC)   |     +-----------------------+     +------------------+
++------------------+                                              |
+                                                                  v
 +------------------+     +-----------------------+     +------------------+
-                                                               |
-                                                               v
+| Risk / circuit / | <-- | Decision + entry      | <-- | Signal path      |
+| fund halt        |     | gates                 |     | (legacy or SMC)  |
 +------------------+     +-----------------------+     +------------------+
-| Risk Manager     | <-- | Decision Engine       | <-- | Signal Generator |
-|                  |     | (Aggregation)         |     | (Mean Reversion) |
-+------------------+     +-----------------------+     +------------------+
-        |                                 ^
-        |                                 |
-        v                                 |
-+------------------+     +-----------------------+     |
-| Execution Layer  | --> | Optional LLM          | ----+
-| (Broker API)     |     | Sentiment Agent       |
+        |                          ^
+        v                          |
++------------------+     +-----------------------+
+| Execution        | --> | Sentiment veto +      |
+| + ExitCoordinator|     | optional agents       |
 +------------------+     +-----------------------+
 ```
 
-#### 3.1 Role of LLM
+#### 3.1 Role of LLM and agents
 
-- **Not** used to generate trade signals.
-- Used **only** to analyze news sentiment and provide a `bullish/bearish/neutral` flag.
-- This flag acts as a **final filter**: if sentiment strongly opposes the signal, the trade is skipped.
+- **Sentiment (`USE_LLM`):** news → `bullish|bearish|neutral`; opposing sentiment blocks the trade. Timeouts / parse failures → `neutral`.
+- **Agents (`AGENTS_*`):** Supervisor / Fund Manager write briefs under `artifacts/agents/`. Mutating actions (pause, circuit reset, proposal emit/apply, rebalance **scan**) are opt-in and dry-run by default. See [`docs/operations.md`](docs/operations.md#grok--llm-agents-supervisor--fund-manager).
 
 ### 4. Component details
 
-#### 4.1 Market data service
+#### 4.1 Market data
 
-Collects OHLCV from exchanges using `ccxt` or `yfinance`.
-
-```python
-import ccxt
-import pandas as pd
-
-exchange = ccxt.binance()
-
-def fetch_ohlcv(symbol="BTC/USDT", timeframe="5m", limit=200):
-    data = exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
-    return pd.DataFrame(data, columns=["timestamp", "open", "high", "low", "close", "volume"])
-```
+OHLCV via `tr_bot/market_data.py` (`fetch_ohlcv`, paginated `fetch_ohlcv_deep`). Live symbols must be ccxt pairs (e.g. `BTC/USDT`).
 
 #### 4.2 Feature engineering
 
-Computes technical indicators used by both the regime model and signals.
+`tr_bot/indicators.py` — RSI, EMA20/50, ATR, and extended TA when enabled. Conceptual sketch:
 
 ```python
 def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
-    df['ema20'] = df['close'].ewm(span=20).mean()
-    df['ema50'] = df['close'].ewm(span=50).mean()
-
-    delta = df['close'].diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.rolling(14).mean()
-    avg_loss = loss.rolling(14).mean()
-    rs = avg_gain / avg_loss
-    df['rsi'] = 100 - (100 / (1 + rs))
-
-    df['atr'] = (df['high'] - df['low']).rolling(14).mean()
+    df["ema20"] = df["close"].ewm(span=20).mean()
+    df["ema50"] = df["close"].ewm(span=50).mean()
+    # RSI / ATR as implemented in tr_bot/indicators.py
     return df
 ```
 
 #### 4.3 ML regime detection
 
-A Random Forest classifier trained to identify **range** vs. **trend** conditions. Mean reversion signals are only considered in range markets in the conceptual flow below.
+`tr_bot/regime.py` — classifier labels used by the engine are **`range`** and **`trend`**. Train on **`TRAIN_TIMEFRAME`**; predict on live **`TIMEFRAME`**. Prefer keeping them equal (fee/R soak: both `1h`). See [`docs/operations.md`](docs/operations.md#regime-model-timeframe-vs-train_timeframe).
+
+#### 4.4 Legacy signal generator
 
 ```python
-from sklearn.ensemble import RandomForestClassifier
-
-class RegimeModel:
-    def __init__(self):
-        self.model = RandomForestClassifier()
-
-    def train(self, df: pd.DataFrame):
-        X = df[['rsi', 'ema20', 'ema50', 'atr']]
-        y = (df['close'] > df['ema20']).rolling(3).mean().fillna(0) > 0.5
-        self.model.fit(X, y.astype(int))
-
-    def predict(self, df: pd.DataFrame) -> str:
-        X = df[['rsi', 'ema20', 'ema50', 'atr']].tail(1)
-        regime = self.model.predict(X)[0]
-        return "trend" if regime == 1 else "range"
-```
-
-#### 4.4 Signal generator – mean reversion
-
-```python
-def mean_reversion_signal(df: pd.DataFrame) -> str:
+# Conceptual — see tr_bot/signals.py
+def mean_reversion_signal(df) -> str:
     last = df.iloc[-1]
-    if last['rsi'] < 30 and last['close'] < last['ema20']:
+    if last["rsi"] < 30 and last["close"] < last["ema20"]:
         return "buy"
-    if last['rsi'] > 70 and last['close'] > last['ema20']:
+    if last["rsi"] > 70 and last["close"] > last["ema20"]:
         return "sell"
     return "hold"
 ```
 
-#### 4.5 Optional LLM sentiment agent
+#### 4.5 Decision engine (legacy)
+
+`tr_bot/decision.py` aggregates regime, signal, TA/fundamentals OK flags, and sentiment:
+
+- **Range:** MR buys blocked if sentiment bearish; sells if bullish.
+- **Trend:** optional trend continuation when `TREND_STRATEGY_ENABLED=true`; ADX floors/caps via `ADX_*` and `SIGNAL_MIN_ADX_MARGIN`.
+
+#### 4.6 Risk management
+
+Production behavior (`tr_bot/risk.py`, `engine.py`):
+
+- Live size uses `effective_risk_per_trade()` (`RISK_PER_TRADE` × `CANARY_RISK_MULTIPLIER` on `live_canary`).
+- Per-trade multiplier: `effective_risk_multiplier(vol_regime, correlation_penalty, session)` from `volatility_regime`, `correlation`, and `market_session` (clamped ~0.25–1.5).
+- Portfolio weights, `apply_canary_notional_cap` / live notional caps, `MAX_TRADES_PER_DAY`, optional `MAX_OPEN_POSITIONS`.
+- Fee/R floor: skip entries when ATR/close < `MIN_ATR_PCT` (reason `atr_too_small_for_costs`).
+- **FundManager** can halt on drawdown (`MAX_DRAWDOWN_PCT`).
+- **Circuit breaker** blocks **new entries** only; exits and holding snapshots continue. `REBALANCE_*` execution contexts skip the circuit.
+
+**Stops (ATR mode):** conceptual geometry is stop ≈ entry ± 1× ATR, take-profit ≈ entry ± 1.5× ATR — confirm multipliers in `position.py` / the active profile. `EXIT_MODE` may be `atr`, `structural`, or `hybrid` on the SMC path.
+
+**Live vs backtest exit economics:** `check_bar` uses bar high/low for TP/stop *hits*. The live loop records PnL using bar **close** after an exit signal; walk-forward backtest often uses theoretical TP/stop **prices**. Align assumptions before comparing Sharpe / profit factor.
+
+#### 4.7 Execution and exits
+
+- Entries: `tr_bot/execution.py`.
+- Closes: **`ExitCoordinator` only** — persist `exit_state=pending` with a stable client order id before submit.
+- Live spot: a **new** raw `sell` entry is rejected (`live_sell_disabled`); closing an existing long still sells.
+- Live starts fail closed via `runtime_validation` (keys, ccxt pairs, notional caps, canary floors, `EXIT_POLICY`).
+
+### 5. Trading loop (conceptual)
+
+Illustrative shape (not copy-paste runnable):
 
 ```python
-import requests
-
-def get_sentiment(news_text: str) -> str:
-    prompt = f"""
-    Analyze the sentiment of the following news headlines.
-    Return JSON: {{"sentiment": "bullish|bearish|neutral"}}
-    News: {news_text}
-    """
-    response = requests.post(
-        "https://api.openai.com/v1/chat/completions",
-        headers={"Authorization": f"Bearer {OPENAI_API_KEY}"},
-        json={
-            "model": "gpt-4o-mini",
-            "messages": [{"role": "user", "content": prompt}],
-            "response_format": {"type": "json_object"}
-        }
-    )
-    result = response.json()["choices"][0]["message"]["content"]
-    return eval(result)["sentiment"]
-```
-
-#### 4.6 Decision engine
-
-Aggregates regime, signal, and sentiment.
-
-- **Range regime:** mean reversion signals ([`mean_reversion_signal`](tr_bot/signals.py)); trades when sentiment does not veto (buy blocked if bearish, sell if bullish).
-- **Trend regime:** optional **trend continuation** ([`trend_continuation_signal`](tr_bot/signals.py)) when **`TREND_STRATEGY_ENABLED=true`** — EMA stack (`close > ema20 > ema50` → buy, mirrored for sell). Same sentiment vetoes as range. When disabled, trend behaves like before (no entries from this engine).
-
-Trend entries use **`trend_regime_ta_allows`** (ADX at least **`ADX_MIN_FOR_TREND`**) when extended TA is on; range entries use **`mean_reversion_ta_allows`** (ADX below **`ADX_MAX_FOR_MEAN_REVERSION`**).
-
-#### 4.7 Risk management
-
-```python
-class RiskManager:
-    def __init__(self, balance: float, risk_per_trade: float = 0.01):
-        self.balance = balance
-        self.risk_per_trade = risk_per_trade
-        self.daily_trades = 0
-        self.max_daily_trades = 5
-
-    def position_size(self, stop_distance: float) -> float:
-        risk_amount = self.balance * self.risk_per_trade
-        return risk_amount / stop_distance
-
-    def can_trade(self) -> bool:
-        return self.daily_trades < self.max_daily_trades
-```
-
-**Production behavior (see `tr_bot/risk.py`, `tr_bot/engine.py`):**
-
-- Live uses **`effective_risk_per_trade()`** (`RISK_PER_TRADE` × **`CANARY_RISK_MULTIPLIER`** in `live_canary`).
-- Portfolio mode applies **`weight_for(symbol)`** to sizing; **`apply_canary_notional_cap`** caps notional on canary.
-- **`MAX_TRADES_PER_DAY`** maps to the risk manager’s daily cap (backtest can enforce per UTC day with `BACKTEST_ENFORCE_MAX_TRADES_PER_DAY`).
-- With **managers** enabled, **`FundManager`** can halt trading when drawdown exceeds **`MAX_DRAWDOWN_PCT`** (see `tr_bot/managers/fund.py`).
-
-**Stop‑loss and take‑profit** (see `tr_bot/position.py`): stop = entry ± 1× ATR; take profit = entry ± 1.5× ATR.
-
-**Live vs backtest exit economics:** `check_bar` uses bar high/low to decide TP/stop *hits*. The live loop records PnL using the bar **close** after an exit signal; the walk-forward backtest uses theoretical TP/stop **prices** for PnL. Treat reported Sharpe/profit factor as comparable only when you align this assumption.
-
-#### 4.8 Execution layer
-
-```python
-def execute_trade(symbol: str, side: str, size: float):
-    order = exchange.create_market_order(symbol, side, size)
-    logger.info(f"Trade executed: {order}")
-    return order
-```
-
-### 5. Trading loop – integrated example
-
-Illustrative end-to-end loop (imports and helpers are schematic):
-
-```python
-import time
-from logger import setup_logger
-from config import SYMBOL, TIMEFRAME, RISK_PER_TRADE, MAX_TRADES_PER_DAY, USE_LLM
-
-logger = setup_logger()
-regime_model = RegimeModel()
-risk = RiskManager(balance=10000, risk_per_trade=RISK_PER_TRADE)
-
-initial_df = fetch_ohlcv(SYMBOL, TIMEFRAME, limit=500)
-initial_df = compute_indicators(initial_df)
-regime_model.train(initial_df)
-
 while True:
-    df = fetch_ohlcv(SYMBOL, TIMEFRAME, limit=200)
+    df = fetch_ohlcv(SYMBOL, TIMEFRAME, limit=LOOP_BARS)
     df = compute_indicators(df)
-    regime = regime_model.predict(df)
-    signal = mean_reversion_signal(df)
-    sentiment = "neutral"
-    if USE_LLM:
-        news = fetch_latest_news()
-        sentiment = get_sentiment(news)
-    decision = decision_engine(regime, signal, sentiment)
-    if decision != "hold" and risk.can_trade():
-        stop_distance = df['atr'].iloc[-1]
-        size = risk.position_size(stop_distance)
-        execute_trade(SYMBOL, decision, size)
-        risk.daily_trades += 1
-        logger.info(f"Trade {decision} executed. Size: {size}")
-    else:
-        logger.info("No trade this cycle")
-    time.sleep(300)
+    # legacy and/or SMC evaluation → entry gates → size → execute
+    # exits via ExitCoordinator; sleep_with_exit_watchdog(POLL_SECONDS)
 ```
 
 ### 6. Infrastructure and deployment
 
-| Layer          | Technology        | Estimated monthly cost |
-|----------------|-------------------|------------------------|
-| Data           | `ccxt`, `yfinance`| $0                     |
-| Indicators     | `pandas`, TA‑Lib  | $0                     |
-| ML model       | `scikit-learn`    | $0                     |
-| LLM (optional) | OpenAI API        | $5–15 (based on usage) |
-| Execution      | Broker API        | $0 (paper trading)     |
-| Backend        | FastAPI + Redis   | $10–20 (VPS)           |
-| Database       | PostgreSQL        | included in VPS        |
-| Monitoring     | Grafana (optional)| $0                     |
-| **Total**      |                   | **~$30/month**         |
-
-Use a **VPS** for 24/7 operation. Container layout is summarized in [Docker](#docker) above.
-
-#### Automated trading (hands-off operation)
-
-The trading process is **automatic**: `python -m tr_bot` (or `./start.sh`) runs `tr_bot.engine.run_forever` with no per-trade confirmation. Pause between cycles is **`POLL_SECONDS`**.
+| Layer | Technology |
+|-------|------------|
+| Data | `ccxt`, `yfinance`, optional CMC / CoinDesk |
+| Indicators / ML | `pandas`, scikit-learn |
+| LLM (optional) | OpenAI-compatible API (incl. xAI) |
+| Execution | Binance spot via ccxt (paper default) |
+| API | FastAPI + optional Redis / Postgres |
+| Artifacts | Shared volume / `ARTIFACTS_DIR` |
 
 **Paper vs live**
 
-- **Paper (default):** `PAPER_TRADING=true` — simulated orders; exchange keys are not attached to the client (avoids signed private calls).
-- **Live (Binance spot):** set `PAPER_TRADING=false`, set **`BINANCE_API_KEY`** and **`BINANCE_SECRET`**, spot trading enabled on the key. Symbols must be **ccxt-style pairs** (e.g. `BTC/USDT`).
+- **Paper (default):** `PAPER_TRADING=true` — simulated orders; API keys are **not** attached to the exchange client.
+- **Live:** `PAPER_TRADING=false` or `DEPLOYMENT_TIER=live_canary|live_full`, with keys and spot enabled. Prefer canary caps before `live_full`.
 
-**Live spot caveat:** Opening a **new** position from a raw **`sell`** signal is **disabled in live** (`live_sell_disabled` in `engine.py`) for spot; **closing a long** via the position-exit path still issues a sell.
+**24/7:** Docker Compose (above) or bare metal under systemd/tmux with `./start.sh`. Optional scheduler does not replace the bot.
 
-**Running 24/7**
+### 7. Expected performance (research targets only)
 
-- **Docker:** shared `ARTIFACTS_DIR` volume between `bot` and `api` (see [Docker](#docker)).
-- **VPS / bare metal:** run `./start.sh` or `.venv/bin/python -m tr_bot` under **systemd**, **tmux**, or similar, with restart on failure.
-
-**Optional scheduler:** `./start.sh --scheduler` runs `tr_bot.scheduler` for periodic training/backtest; it does **not** replace the trading loop. Interval and gate variables are `SCHEDULER_*`, `STARTUP_*`, and training/backtest keys in [`.env.example`](.env.example); narrative detail is in [`docs/operations.md`](docs/operations.md).
-
-**Safety and monitoring:** `RISK_PER_TRADE`, `MAX_TRADES_PER_DAY`, `MAX_DRAWDOWN_PCT`, circuit breaker, manual halt / fund halt, notifications ([`.env.example`](.env.example)). FastAPI dashboard (`./start.sh --api`) reads the same `ARTIFACTS_DIR` as the bot.
-
-### 7. Expected performance
-
-When tuned on liquid assets with RSI mean reversion and regime filtering, research targets have included:
-
-| Metric          | Target range |
-|-----------------|--------------|
-| Win rate        | 65–72%       |
-| Profit factor   | 1.5–2.0      |
-| Max drawdown    | <10%         |
-| Avg trades/day  | 2–5          |
-
-Past or backtested performance does not guarantee future results.
+When tuned on liquid assets with regime filtering, **historical research targets** have included ~65–72% win rate and profit factor ~1.5–2.0 with drawdown under ~10%. These are **not** product SLAs. Past or backtested results do not guarantee future performance.
 
 ### Scheduled training, backtest, and CLI
-
-Offline **regime training** and **walk-forward backtest** on configured `SYMBOL` / `TIMEFRAME`:
 
 ```bash
 .venv/bin/python -m tr_bot.managers train-run
 .venv/bin/python -m tr_bot.managers backtest-run
+.venv/bin/python -m tr_bot.managers backtest-compare
+.venv/bin/python -m tr_bot.managers strategy-status
 ```
 
-Artifacts land under `ARTIFACTS_DIR` (e.g. `training/last_run.json`, `training/backtest_last_run.json`) and surface in the dashboard API.
+Full command list: [`docs/cli.md`](docs/cli.md). Scheduler and `--all` hard-block stages: [`docs/operations.md`](docs/operations.md).
 
-**Scheduler:** run `./start.sh --scheduler` or `python -m tr_bot.scheduler`. Configure `SCHEDULER_TRAINING_INTERVAL_SECONDS`, `SCHEDULER_BACKTEST_INTERVAL_SECONDS`, `SCHEDULER_TICK_SECONDS`, and related flags in `.env` (see [`.env.example`](.env.example)).
+**Selected backtest knobs:** `BACKTEST_ENFORCE_*`, `BACKTEST_USE_CIRCUIT_BREAKER`, `BACKTEST_EXECUTION_REALISM_*`, `BACKTEST_EXIT_*`, `BACKTEST_MIN_RISK_METRIC_OBS`, `BACKTEST_ANNUAL_GAP_MULTIPLIER`. Metrics metadata lands in `training/backtest_last_run.json` (`risk_metric_meta`).
 
-**`./start.sh --all` hard-block path:** preflight → `train-run` → bounded tuning → `backtest-run` → startup backtest gate; on failure with `STARTUP_HARD_BLOCK=true`, trading does not start. Full stage list: [`docs/operations.md`](docs/operations.md).
+### Dashboard
 
-**Cron / systemd (without long-lived scheduler):**
+`GET /api/dashboard/summary` (optional `DASHBOARD_TOKEN`). UI: Overview / Risk / Strategy / Jobs / Diagnostics; `DASHBOARD_UI=v1|v2|v3` (v3 = Operator Command Console; fallback v3→v2→v1). Writes off until `DASHBOARD_WRITES_ENABLED` + token. Details: [`docs/dashboard.md`](docs/dashboard.md).
 
-```cron
-0 2 * * * cd /path/to/tr_bot && .venv/bin/python -m tr_bot.managers train-run >> /var/log/tr_bot_train.log 2>&1
-15 * * * * cd /path/to/tr_bot && .venv/bin/python -m tr_bot.managers backtest-run >> /var/log/tr_bot_backtest.log 2>&1
-```
+### Safety invariants (summary)
 
-**Compact CLI output:**
+- LLM / agents never open trades.
+- Circuit blocks entries only; exits still run.
+- One closer: `ExitCoordinator`.
+- Live fails closed on missing keys, bad symbols, zero max notional, or unsupported `EXIT_POLICY`.
+- Decision-log and notification failures must not stop the loop.
+- Artifact paths stay under `ARTIFACTS_DIR`; redact secrets in logs/notifications.
 
-```bash
-python -m tr_bot.managers train-run --compact
-python -m tr_bot.managers backtest-run --compact
-```
+Full list: [`skills.md`](skills.md#safety-invariants).
 
-**Backtest parity and metrics (selected `.env` knobs):**
+### 8. Conclusion
 
-| Variable | Role |
-|----------|------|
-| `BACKTEST_ENFORCE_REGIME_CONFIDENCE`, `BACKTEST_ENFORCE_SIGNAL_STRENGTH`, `BACKTEST_ENFORCE_LOSS_COOLDOWN` | Mirror live gating when `true` |
-| `BACKTEST_USE_CIRCUIT_BREAKER`, `BACKTEST_CIRCUIT_MAX_CONSECUTIVE_LOSSES` | Circuit behavior in sim |
-| `BACKTEST_EXECUTION_REALISM_*` | Probabilistic entry skip/reject/partial fills |
-| `BACKTEST_EXIT_REALISM_*`, `BACKTEST_EXIT_DELAY_FILL_NEXT_BAR`, `BACKTEST_EXIT_DELAY_FILL_PRICE` | Exit delay / partial / slippage |
-| `BACKTEST_MIN_RISK_METRIC_OBS` | Min return steps before Sharpe/Sortino are **published** |
-| `BACKTEST_ANNUAL_GAP_MULTIPLIER` | Gap handling when inferring steps/year |
-
-Walk-forward code: `tr_bot/backtest/runner.py`. Metrics metadata: `risk_metric_meta` in `training/backtest_last_run.json`.
-
-### Dashboard: P&L and cost analysis
-
-The dashboard includes **P&L and cost analysis** backed by artifacts and `trade_ledger.jsonl`. HTTP: `GET /api/dashboard/summary` (optional `DASHBOARD_TOKEN`). Details: [`docs/dashboard.md`](docs/dashboard.md).
-
-**Data sources**
-
-- `artifacts/equity_history.json` — equity rollups
-- `artifacts/fund_state.json` — NAV context
-- `artifacts/training/backtest_last_run.json` — last simulation summary
-- `artifacts/trade_ledger.jsonl` — closed trades
-
-**Config snapshot:** `config.effective_tier_overrides` exposes `env_before_tier_apply` vs `effective_after_tier` for tier-gated keys.
-
-**Trade summary:** distinguishes TP/stop outcome rate from net-PnL win rate after fees.
-
-**Cost assumptions:** ledger display uses `LIVE_FEE_BPS` / `LIVE_SLIPPAGE_BPS`; backtest rows use `BACKTEST_FEE_BPS` / `BACKTEST_SLIPPAGE_BPS`.
-
-### Operations notes
-
-- **`stop.sh`** — portable prompt handling across bash/zsh/sh.
-- **Paper mode** — no API keys on the exchange client to avoid private signed endpoint errors.
-- **Diagnostics:** `address already in use` → stale process on `8080`; `Ready · Postgres down` → DB URL/auth; repeated sentiment `429` → LLM rate limit (engine falls back to neutral).
-
-### 8. Safety and hallucination protection
-
-- **LLM not authoritative:** sentiment only vetoes; it never initiates a trade.
-- **Structured outputs:** JSON schema validation where configured.
-- **Confidence threshold:** ignore weak LLM output when below configured confidence (e.g. `LLM_MIN_CONFIDENCE`).
-- **Latency guards:** timeout and neutral fallback.
-- **Circuit breaker:** stop new entries after consecutive **outcome** losses (`CIRCUIT_BREAKER_MAX_CONSECUTIVE_LOSSES`); state under `artifacts/circuit_state.json`; reset via `.circuit_reset` / dashboard (see `tr_bot/circuit_breaker.py`).
-
-### 9. Conclusion
-
-The design targets disciplined execution by combining **regime detection** and **mean reversion** (with optional trend and LLM veto), modular services, and explicit risk controls. The runnable implementation lives in `tr_bot/` with FastAPI, managers, walk-forward backtest, and optional Postgres/Redis integrations as described above and in `docs/`.
+The runnable system emphasizes **regime-aware entries**, optional **SMC / HIATP-style scoring**, **session- and vol-aware sizing**, **explicit exit authority** (`ExitCoordinator`), and **paper-first** ops with promotion tiers. Prefer `tr_bot/`, [`skills.md`](skills.md), and `docs/` over schematic snippets when implementing changes.
 
 ## Disclaimer
 
-This software is provided for **educational and operational experimentation** only. It is **not financial advice**. Cryptocurrency and derivatives trading involve substantial risk of loss. Use **paper mode** until you fully understand behavior, fees, and failure modes. The authors and contributors are **not responsible** for losses, bugs, exchange outages, or regulatory issues. You are solely responsible for compliance, API key security, and any capital you deploy.
+This software is provided for **educational and operational experimentation** only. It is **not financial advice**. Cryptocurrency trading involves substantial risk of loss. Use **paper mode** until you fully understand behavior, fees, and failure modes. The authors and contributors are **not responsible** for losses, bugs, exchange outages, or regulatory issues. You are solely responsible for compliance, API key security, and any capital you deploy.

@@ -1,50 +1,103 @@
 volumes:
   tr_bot_artifacts:
+  tr_bot_pg:
+
+x-app-env: &app-env
+  env_file: .env
+  environment:
+    REDIS_URL: redis://redis:6379/0
+    DATABASE_URL: postgresql://${POSTGRES_USER:-tr_bot}:${POSTGRES_PASSWORD:-tr_bot}@db:5432/${POSTGRES_DB:-tr_bot}
+    ARTIFACTS_DIR: /app/artifacts
+    # Container always listens on 8080; host publish uses ${API_PORT:-8080} below.
+    API_PORT: "8080"
+  volumes:
+    - tr_bot_artifacts:/app/artifacts
 
 services:
   redis:
     image: redis:7-alpine
-    ports:
-      - "6379:6379"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
 
   db:
     image: timescale/timescaledb:latest-pg16
+    restart: unless-stopped
     environment:
-      POSTGRES_USER: tr_bot
-      POSTGRES_PASSWORD: tr_bot
-      POSTGRES_DB: tr_bot
-    ports:
-      - "5433:5432"
+      POSTGRES_USER: ${POSTGRES_USER:-tr_bot}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-tr_bot}
+      POSTGRES_DB: ${POSTGRES_DB:-tr_bot}
+    volumes:
+      - tr_bot_pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-tr_bot} -d ${POSTGRES_DB:-tr_bot}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  startup:
+    build: .
+    <<: *app-env
+    command: ["startup"]
+    restart: on-failure
+    depends_on:
+      redis:
+        condition: service_healthy
+      db:
+        condition: service_healthy
 
   api:
     build: .
-    command: uvicorn tr_bot.health:app --host 0.0.0.0 --port 8080
+    <<: *app-env
+    command: ["api"]
+    restart: unless-stopped
     ports:
-      - "8080:8080"
-    environment:
-      REDIS_URL: redis://redis:6379/0
-      DATABASE_URL: postgresql://tr_bot:tr_bot@db:5432/tr_bot
-      ARTIFACTS_DIR: /app/artifacts
-    volumes:
-      - tr_bot_artifacts:/app/artifacts
+      # Default 0.0.0.0 so Pi nginx (other host) can reach the API on the LAN.
+      # Keep the router closed (no WAN port-forward). Optional: ufw allow from Pi IP only.
+      - "${API_PUBLISH:-0.0.0.0}:${API_PORT:-8080}:8080"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=3)",
+        ]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
     depends_on:
-      - redis
-      - db
+      redis:
+        condition: service_healthy
+      db:
+        condition: service_healthy
 
   bot:
     build: .
-    command: python -m tr_bot
-    environment:
-      SYMBOL: BTC/USDT
-      TIMEFRAME: 5m
-      PAPER_TRADING: "true"
-      USE_LLM: "false"
-      POLL_SECONDS: 300
-      REDIS_URL: redis://redis:6379/0
-      DATABASE_URL: postgresql://tr_bot:tr_bot@db:5432/tr_bot
-      ARTIFACTS_DIR: /app/artifacts
-    volumes:
-      - tr_bot_artifacts:/app/artifacts
+    <<: *app-env
+    command: ["bot"]
+    restart: unless-stopped
     depends_on:
-      - redis
-      - db
+      redis:
+        condition: service_healthy
+      db:
+        condition: service_healthy
+      startup:
+        condition: service_completed_successfully
+
+  scheduler:
+    build: .
+    <<: *app-env
+    command: ["scheduler"]
+    restart: unless-stopped
+    depends_on:
+      redis:
+        condition: service_healthy
+      db:
+        condition: service_healthy
+      startup:
+        condition: service_completed_successfully

@@ -7,6 +7,41 @@ from typing import Any
 
 logger = logging.getLogger("tr_bot.db.coindesk_schema")
 
+# None = unknown; True = pg_extension has timescaledb; False = plain PostgreSQL only.
+_TIMESCALE_INSTALLED: bool | None = None
+
+
+def _safe_rollback(conn: Any) -> None:
+    try:
+        if getattr(conn, "closed", 0):
+            return
+        conn.rollback()
+    except Exception:
+        pass
+
+
+def _timescale_extension_installed(conn: Any) -> bool:
+    """True when timescaledb is already installed (never attempt runtime CREATE EXTENSION)."""
+    global _TIMESCALE_INSTALLED
+    if _TIMESCALE_INSTALLED is not None:
+        return _TIMESCALE_INSTALLED
+    with conn.cursor() as cur:
+        cur.execute("SELECT 1 FROM pg_extension WHERE extname = 'timescaledb'")
+        _TIMESCALE_INSTALLED = cur.fetchone() is not None
+    if not _TIMESCALE_INSTALLED:
+        logger.info(
+            "TimescaleDB extension not installed; CoinDesk tables use plain PostgreSQL "
+            "(install timescaledb once via DB init to enable hypertables)"
+        )
+    return _TIMESCALE_INSTALLED
+
+
+def reset_timescale_probe_cache() -> None:
+    """Test helper: clear cached Timescale probe."""
+    global _TIMESCALE_INSTALLED
+    _TIMESCALE_INSTALLED = None
+
+
 _TABLE_DDL = [
     """
 CREATE TABLE IF NOT EXISTS coindesk_ticks (
@@ -100,31 +135,26 @@ _HYPERTABLES = [
 
 
 def ensure_coindesk_schema(conn: Any) -> None:
-    """Create tables; enable Timescale hypertables when extension exists."""
+    """Create tables; enable Timescale hypertables only when extension is already installed.
+
+    Runtime ``CREATE EXTENSION timescaledb`` can crash PostgreSQL when shared_preload_libraries
+    is not configured (common on mis-provisioned hosts). Plain tables work without hypertables.
+    """
     with conn.cursor() as cur:
         for stmt in _TABLE_DDL:
             cur.execute(stmt.strip())
     conn.commit()
 
-    ext_ok = False
-    with conn.cursor() as cur:
-        try:
-            cur.execute("CREATE EXTENSION IF NOT EXISTS timescaledb CASCADE")
-            conn.commit()
-            ext_ok = True
-        except Exception as e:
-            conn.rollback()
-            logger.warning("TimescaleDB extension unavailable (%s); using plain PostgreSQL tables", e)
+    if not _timescale_extension_installed(conn):
+        return
 
-    if ext_ok:
-        # One hypertable per transaction so a failure does not leave the session aborted.
-        for table, time_col in _HYPERTABLES:
-            try:
-                with conn.cursor() as cur:
-                    cur.execute(
-                        f"SELECT create_hypertable('{table}', '{time_col}', if_not_exists => TRUE)"
-                    )
-                conn.commit()
-            except Exception as e:
-                conn.rollback()
-                logger.warning("create_hypertable %s failed: %s", table, e)
+    for table, time_col in _HYPERTABLES:
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"SELECT create_hypertable('{table}', '{time_col}', if_not_exists => TRUE)"
+                )
+            conn.commit()
+        except Exception as e:
+            _safe_rollback(conn)
+            logger.warning("create_hypertable %s failed: %s", table, e)

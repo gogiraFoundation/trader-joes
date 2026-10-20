@@ -17,6 +17,19 @@ from tr_bot.strategy.no_trade_adaptation import run_adaptation_job
 
 logger = setup_logger("tr_bot.scheduler")
 
+
+def _run_agents_job() -> None:
+    from tr_bot.agents.runner import run_agents_job
+
+    out = run_agents_job()
+    logger.info(
+        "Scheduler agents: ok=%s dry_run=%s skipped=%s roles=%s",
+        out.get("ok"),
+        out.get("dry_run"),
+        out.get("skipped"),
+        len(out.get("roles") or []),
+    )
+
 _lock = threading.Lock()
 
 
@@ -51,6 +64,7 @@ def run_forever() -> None:
     adapt_iv = int(config.ADAPTATION_INTERVAL_SECONDS)
     asset_iv = int(config.SCHEDULER_COINDESK_ASSET_TOP_LIST_INTERVAL_SECONDS)
     daily_report_iv = int(config.SCHEDULER_DAILY_REPORT_INTERVAL_SECONDS)
+    agents_iv = int(config.SCHEDULER_AGENTS_INTERVAL_SECONDS)
     tick = max(5, int(config.SCHEDULER_TICK_SECONDS))
     initial = float(config.SCHEDULER_INITIAL_DELAY_SECONDS)
 
@@ -62,6 +76,7 @@ def run_forever() -> None:
         or adapt_iv > 0
         or asset_iv > 0
         or daily_report_iv > 0
+        or agents_iv > 0
     )
     if not active:
         logger.error(
@@ -69,12 +84,14 @@ def run_forever() -> None:
             "SCHEDULER_TRAINING_INTERVAL_SECONDS / SCHEDULER_BACKTEST_INTERVAL_SECONDS / "
             "SCHEDULER_PROMOTION_INTERVAL_SECONDS / ADAPTATION_INTERVAL_SECONDS / "
             "SCHEDULER_COINDESK_ASSET_TOP_LIST_INTERVAL_SECONDS / "
-            "SCHEDULER_DAILY_REPORT_INTERVAL_SECONDS"
+            "SCHEDULER_DAILY_REPORT_INTERVAL_SECONDS / "
+            "SCHEDULER_AGENTS_INTERVAL_SECONDS"
         )
         return
 
     logger.info(
-        "Scheduler tick=%ss training_interval=%ss backtest_interval=%ss promotion_interval=%ss adaptation_interval=%ss asset_top_list_interval=%ss daily_report_interval=%ss",
+        "Scheduler tick=%ss training_interval=%ss backtest_interval=%ss promotion_interval=%ss "
+        "adaptation_interval=%ss asset_top_list_interval=%ss daily_report_interval=%ss agents_interval=%ss",
         tick,
         train_iv,
         back_iv,
@@ -82,6 +99,7 @@ def run_forever() -> None:
         adapt_iv,
         asset_iv,
         daily_report_iv,
+        agents_iv,
     )
 
     if initial > 0:
@@ -93,6 +111,7 @@ def run_forever() -> None:
     last_adapt: float | None = None
     last_asset: float | None = None
     last_daily_report: float | None = None
+    last_agents: float | None = None
 
     def _run_promotion_eval() -> None:
         out = strategy_evaluate()
@@ -137,6 +156,9 @@ def run_forever() -> None:
     if config.SCHEDULER_RUN_DAILY_REPORT_ON_START and daily_report_iv > 0:
         _run_locked("daily_report", _run_daily_report)
         last_daily_report = time.time()
+    if config.SCHEDULER_RUN_AGENTS_ON_START and agents_iv > 0:
+        _run_locked("agents", _run_agents_job)
+        last_agents = time.time()
 
     # due_for_interval(None, interval, now) is True — so without this, the first loop
     # iteration would run training/backtest immediately after startup (duplicate of
@@ -153,6 +175,8 @@ def run_forever() -> None:
         last_asset = time.time()
     if daily_report_iv > 0 and last_daily_report is None:
         last_daily_report = time.time()
+    if agents_iv > 0 and last_agents is None:
+        last_agents = time.time()
 
     while True:
         now = time.time()
@@ -174,6 +198,9 @@ def run_forever() -> None:
         if daily_report_iv > 0 and due_for_interval(last_daily_report, daily_report_iv, now):
             _run_locked("daily_report", _run_daily_report)
             last_daily_report = time.time()
+        if agents_iv > 0 and due_for_interval(last_agents, agents_iv, now):
+            _run_locked("agents", _run_agents_job)
+            last_agents = time.time()
         time.sleep(tick)
 
 

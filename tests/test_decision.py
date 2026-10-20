@@ -49,6 +49,22 @@ def test_buy_in_range_bullish_sentiment() -> None:
     assert decision_engine("range", "buy", "bullish", ta_ok=True, fundamentals_ok=True) == "buy"
 
 
+def test_bullish_sentiment_never_invents_trade_from_hold() -> None:
+    """Bullish is veto-capable for sells only; it must not enable a trade without a signal."""
+    assert decision_engine("range", "hold", "bullish", ta_ok=True, fundamentals_ok=True) == "hold"
+    assert (
+        decision_engine(
+            "trend",
+            "hold",
+            "bullish",
+            ta_ok=True,
+            fundamentals_ok=True,
+            trend_strategy_enabled=True,
+        )
+        == "hold"
+    )
+
+
 def test_buy_veto_bearish_sentiment() -> None:
     assert decision_engine("range", "buy", "bearish", ta_ok=True, fundamentals_ok=True) == "hold"
 

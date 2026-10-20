@@ -11,7 +11,11 @@ from typing import Any
 import pandas as pd
 
 from tr_bot import config
-from tr_bot.managers.security import collapse_artifact_dir_duplication, resolve_path_under_artifact_dir
+from tr_bot.managers.security import (
+    collapse_artifact_dir_duplication,
+    is_valid_ccxt_spot_symbol,
+    resolve_path_under_artifact_dir,
+)
 from tr_bot.indicators import compute_indicators
 from tr_bot.logger import setup_logger
 from tr_bot.market_data import fetch_ohlcv
@@ -43,6 +47,43 @@ def _parse_sources(s: str) -> set[str]:
     out: set[str] = set()
     for x in (x.strip().lower() for x in s.split(",") if x.strip()):
         out.add("exchange" if x == "binance" else x)
+    return out
+
+
+def resolve_train_exchange_symbols(
+    raw: str | None = None,
+    *,
+    fallback_symbol: str | None = None,
+) -> list[str]:
+    """
+    Parse comma-separated TRAIN_EXCHANGE_SYMBOL into CCXT pairs.
+
+    Empty input falls back to ``SYMBOL``. Dedupes while preserving order.
+    Rejects tokens without ``/`` or that fail ``is_valid_ccxt_spot_symbol``.
+    """
+    text = (raw if raw is not None else config.TRAIN_EXCHANGE_SYMBOL).strip()
+    fallback = (fallback_symbol if fallback_symbol is not None else config.SYMBOL).strip()
+    tokens = [t.strip() for t in text.split(",") if t.strip()] if text else []
+    if not tokens and fallback:
+        tokens = [fallback]
+
+    out: list[str] = []
+    seen: set[str] = set()
+    for tok in tokens:
+        if "/" not in tok or not is_valid_ccxt_spot_symbol(tok):
+            raise ValueError(
+                f"Invalid exchange training symbol {tok!r}; expected CCXT pair like BTC/USDT"
+            )
+        key = tok.upper()
+        if key in seen:
+            continue
+        seen.add(key)
+        # Preserve original slash casing style but normalize base/quote letters.
+        base, quote = tok.split("/", 1)
+        normalized = f"{base.strip().upper()}/{quote.strip().upper()}"
+        out.append(normalized)
+    if not out:
+        raise ValueError("No exchange training symbols resolved from TRAIN_EXCHANGE_SYMBOL / SYMBOL")
     return out
 
 
@@ -201,38 +242,44 @@ def collect_training_frames() -> pd.DataFrame:
                     continue
                 frames.append(cdf)
                 if config.COINDESK_STORE_ENABLED:
-                    # Materialize rows before opening DB: ping + iterrows left the socket idle and
-                    # poolers / server idle timeouts closed the session before upsert (see coindesk_repo).
+                    # Materialize rows before opening DB: iterrows left the socket idle before we fixed ordering.
                     ohlcv_rows = coindesk_repo.training_ohlcv_rows_from_dataframe(cdf)
                     store_conn = None
+                    _coindesk_db_attempts = 3
+                    _coindesk_db_backoff_s = 0.5
                     try:
-                        store_conn = coindesk_repo.connect()
-                        coindesk_repo.ping(store_conn)
-                    except Exception as e:
-                        logger.warning("CoinDesk DB connect/ping failed for %s (skip store): %s", inst, e)
-                        coindesk_repo.safe_close(store_conn)
-                        continue
-                    try:
-                        coindesk_repo.upsert_ohlcv_rows(store_conn, ohlcv_rows)
-                    except Exception as e:
-                        if coindesk_repo.is_recoverable_connection_error(e):
-                            logger.warning(
-                                "CoinDesk OHLCV store transient DB error for %s, retry once: %s",
-                                inst,
-                                e,
-                            )
-                            coindesk_repo.safe_close(store_conn)
-                            store_conn = None
+                        for attempt in range(_coindesk_db_attempts):
                             try:
                                 store_conn = coindesk_repo.connect()
                                 coindesk_repo.ping(store_conn)
                                 coindesk_repo.upsert_ohlcv_rows(store_conn, ohlcv_rows)
-                            except Exception as e2:
-                                logger.warning(
-                                    "CoinDesk OHLCV store failed for %s after retry: %s", inst, e2
-                                )
-                        else:
-                            logger.warning("CoinDesk OHLCV store failed for %s: %s", inst, e)
+                                break
+                            except Exception as e:
+                                coindesk_repo.safe_close(store_conn)
+                                store_conn = None
+                                recoverable = coindesk_repo.is_recoverable_connection_error(e)
+                                last_attempt = attempt == _coindesk_db_attempts - 1
+                                if recoverable and not last_attempt:
+                                    logger.warning(
+                                        "CoinDesk OHLCV store transient DB error for %s "
+                                        "(attempt %s/%s): %s",
+                                        inst,
+                                        attempt + 1,
+                                        _coindesk_db_attempts,
+                                        e,
+                                    )
+                                    time.sleep(_coindesk_db_backoff_s)
+                                    continue
+                                if recoverable and last_attempt:
+                                    logger.warning(
+                                        "CoinDesk OHLCV store failed for %s after %s attempts: %s",
+                                        inst,
+                                        _coindesk_db_attempts,
+                                        e,
+                                    )
+                                else:
+                                    logger.warning("CoinDesk OHLCV store failed for %s: %s", inst, e)
+                                break
                     finally:
                         coindesk_repo.safe_close(store_conn)
             if config.COINDESK_STORE_ENABLED and config.COINDESK_EXPORT_PARQUET_PATH.strip():
@@ -262,33 +309,54 @@ def collect_training_frames() -> pd.DataFrame:
                     logger.warning("CoinDesk DB parquet export skipped: %s", e)
 
     if "exchange" in sources:
-        sym = config.TRAIN_EXCHANGE_SYMBOL.strip() or config.SYMBOL
+        symbols = resolve_train_exchange_symbols()
         rng = _exchange_range_ms()
-        if rng[0] is not None and rng[1] is not None:
-            logger.info(
-                "Fetching exchange OHLCV (paginated): %s %s range_ms=%s..%s",
-                sym,
-                config.TRAIN_TIMEFRAME,
-                rng[0],
-                rng[1],
-            )
-            df = fetch_exchange_ohlcv_range(
-                sym,
-                config.TRAIN_TIMEFRAME,
-                rng[0],
-                rng[1],
-            )
-        else:
-            logger.info(
-                "Fetching exchange OHLCV: %s %s limit=%s",
-                sym,
-                config.TRAIN_TIMEFRAME,
-                config.TRAIN_EXCHANGE_LIMIT,
-            )
-            df = fetch_ohlcv(sym, config.TRAIN_TIMEFRAME, limit=config.TRAIN_EXCHANGE_LIMIT)
-        df["source"] = "exchange"
-        df["asset"] = sym.replace("/", "_")
-        frames.append(df)
+        delay = max(0.0, float(config.TRAIN_EXCHANGE_FETCH_SLEEP_S))
+        for i, sym in enumerate(symbols):
+            try:
+                if rng[0] is not None and rng[1] is not None:
+                    logger.info(
+                        "Fetching exchange OHLCV (paginated): %s %s range_ms=%s..%s",
+                        sym,
+                        config.TRAIN_TIMEFRAME,
+                        rng[0],
+                        rng[1],
+                    )
+                    df = fetch_exchange_ohlcv_range(
+                        sym,
+                        config.TRAIN_TIMEFRAME,
+                        rng[0],
+                        rng[1],
+                    )
+                else:
+                    logger.info(
+                        "Fetching exchange OHLCV: %s %s limit=%s",
+                        sym,
+                        config.TRAIN_TIMEFRAME,
+                        config.TRAIN_EXCHANGE_LIMIT,
+                    )
+                    df = fetch_ohlcv(sym, config.TRAIN_TIMEFRAME, limit=config.TRAIN_EXCHANGE_LIMIT)
+            except Exception as e:
+                logger.warning("[exchange_symbol_skipped] symbol=%s: %s", sym, e)
+                if config.TRAIN_EXCHANGE_FAIL_ON_SKIP:
+                    raise RuntimeError(
+                        f"Exchange symbol {sym!r} failed and TRAIN_EXCHANGE_FAIL_ON_SKIP is set: {e}"
+                    ) from e
+                continue
+            if df is None or df.empty:
+                logger.warning("[exchange_symbol_skipped] symbol=%s: empty OHLCV", sym)
+                if config.TRAIN_EXCHANGE_FAIL_ON_SKIP:
+                    raise RuntimeError(
+                        f"Exchange symbol {sym!r} returned empty OHLCV and "
+                        "TRAIN_EXCHANGE_FAIL_ON_SKIP is set"
+                    )
+                continue
+            df = df.copy()
+            df["source"] = "exchange"
+            df["asset"] = sym.replace("/", "_")
+            frames.append(df)
+            if delay > 0 and i + 1 < len(symbols):
+                time.sleep(delay)
 
     if not frames:
         raise RuntimeError(
@@ -297,6 +365,35 @@ def collect_training_frames() -> pd.DataFrame:
         )
 
     return pd.concat(frames, ignore_index=True)
+
+
+def _exchange_manifest_fields() -> dict[str, Any]:
+    """Include resolved exchange symbols in dataset manifest when exchange is enabled."""
+    sources = _parse_sources(config.TRAIN_SOURCES)
+    if "exchange" not in sources:
+        return {}
+    try:
+        symbols = resolve_train_exchange_symbols()
+    except ValueError:
+        return {}
+    return {
+        "exchange_symbols": symbols,
+        "exchange_symbol_count": len(symbols),
+    }
+
+
+def _dataset_coverage_fields(df: pd.DataFrame) -> dict[str, Any]:
+    """Primary asset tag + per-asset row counts for training observability."""
+    from tr_bot.training.regime_dataset import resolve_primary_asset_tag
+
+    out: dict[str, Any] = {
+        "primary_asset": resolve_primary_asset_tag() or None,
+        "primary_sample_weight": float(config.TRAIN_PRIMARY_SAMPLE_WEIGHT or 1.0),
+    }
+    if "asset" in df.columns and len(df) > 0:
+        counts = df["asset"].astype(str).value_counts()
+        out["rows_by_asset"] = {str(k): int(v) for k, v in counts.items()}
+    return out
 
 
 def _normalize_dataset_mode(mode: str | None) -> str:
@@ -335,7 +432,13 @@ def run_training_pipeline(
             raw = collect_training_frames()
             manifest = save_training_dataset(
                 raw,
-                extra_manifest={"from_network": True, "dataset_mode": mode, "replaced_small_cache": True},
+                extra_manifest={
+                    "from_network": True,
+                    "dataset_mode": mode,
+                    "replaced_small_cache": True,
+                    **_exchange_manifest_fields(),
+                    **_dataset_coverage_fields(raw),
+                },
             )["manifest"]
         else:
             dataset_from_cache = True
@@ -344,7 +447,12 @@ def run_training_pipeline(
         raw = collect_training_frames()
         manifest = save_training_dataset(
             raw,
-            extra_manifest={"from_network": True, "dataset_mode": mode},
+            extra_manifest={
+                "from_network": True,
+                "dataset_mode": mode,
+                **_exchange_manifest_fields(),
+                **_dataset_coverage_fields(raw),
+            },
         )["manifest"]
 
     if config.CMC_TRAIN_MACRO_MERGE_ENABLED and (config.CMC_API_KEY or "").strip():

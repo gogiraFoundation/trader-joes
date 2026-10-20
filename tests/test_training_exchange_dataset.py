@@ -100,6 +100,7 @@ def test_exchange_range_ms_lookback(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(pipe.config, "TRAIN_EXCHANGE_END_MS", "")
     monkeypatch.setattr(pipe.config, "TRAIN_EXCHANGE_FETCH_SLEEP_S", 0.0)
     monkeypatch.setattr(pipe.config, "TRAIN_EXCHANGE_CHUNK_LIMIT", 1000)
+    monkeypatch.setattr(pipe.config, "TRAIN_EXCHANGE_FAIL_ON_SKIP", False)
 
     mock_df = pd.DataFrame(
         {
@@ -122,3 +123,90 @@ def test_exchange_range_ms_lookback(monkeypatch: pytest.MonkeyPatch) -> None:
     assert args[0] == "BTC/USDT"
     assert args[1] == "1d"
     assert args[2] < args[3]
+
+
+def test_resolve_train_exchange_symbols_csv_and_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+    from tr_bot.training.pipeline import resolve_train_exchange_symbols
+
+    assert resolve_train_exchange_symbols("SOL/USDT, BTC/USDT, sol/usdt") == [
+        "SOL/USDT",
+        "BTC/USDT",
+    ]
+    monkeypatch.setattr("tr_bot.training.pipeline.config.SYMBOL", "ETH/USDT")
+    assert resolve_train_exchange_symbols("") == ["ETH/USDT"]
+    with pytest.raises(ValueError, match="Invalid exchange training symbol"):
+        resolve_train_exchange_symbols("SPY")
+
+
+def test_collect_training_frames_multi_exchange_symbols(monkeypatch: pytest.MonkeyPatch) -> None:
+    import tr_bot.training.pipeline as pipe
+
+    monkeypatch.setattr(pipe.config, "TRAIN_SOURCES", "exchange")
+    monkeypatch.setattr(pipe.config, "TRAIN_EXCHANGE_SYMBOL", "BTC/USDT,ETH/USDT")
+    monkeypatch.setattr(pipe.config, "TRAIN_TIMEFRAME", "1d")
+    monkeypatch.setattr(pipe.config, "TRAIN_EXCHANGE_LOOKBACK_DAYS", 7)
+    monkeypatch.setattr(pipe.config, "TRAIN_EXCHANGE_START_MS", "")
+    monkeypatch.setattr(pipe.config, "TRAIN_EXCHANGE_END_MS", "")
+    monkeypatch.setattr(pipe.config, "TRAIN_EXCHANGE_FETCH_SLEEP_S", 0.0)
+    monkeypatch.setattr(pipe.config, "TRAIN_EXCHANGE_FAIL_ON_SKIP", False)
+
+    def _fake_range(symbol: str, timeframe: str, start_ms: int, end_ms: int, **kwargs):
+        return pd.DataFrame(
+            {
+                "timestamp": [1000],
+                "open": [1.0],
+                "high": [1.0],
+                "low": [1.0],
+                "close": [1.0],
+                "volume": [1.0],
+            }
+        )
+
+    mock_range = MagicMock(side_effect=_fake_range)
+    monkeypatch.setattr(pipe, "fetch_exchange_ohlcv_range", mock_range)
+
+    df = pipe.collect_training_frames()
+    assert len(df) == 2
+    assert set(df["asset"]) == {"BTC_USDT", "ETH_USDT"}
+    assert mock_range.call_count == 2
+    assert mock_range.call_args_list[0].args[0] == "BTC/USDT"
+    assert mock_range.call_args_list[1].args[0] == "ETH/USDT"
+
+
+def test_collect_training_frames_fail_on_skip(monkeypatch: pytest.MonkeyPatch) -> None:
+    import tr_bot.training.pipeline as pipe
+
+    monkeypatch.setattr(pipe.config, "TRAIN_SOURCES", "exchange")
+    monkeypatch.setattr(pipe.config, "TRAIN_EXCHANGE_SYMBOL", "BTC/USDT,ETH/USDT")
+    monkeypatch.setattr(pipe.config, "TRAIN_TIMEFRAME", "1d")
+    monkeypatch.setattr(pipe.config, "TRAIN_EXCHANGE_LOOKBACK_DAYS", 7)
+    monkeypatch.setattr(pipe.config, "TRAIN_EXCHANGE_START_MS", "")
+    monkeypatch.setattr(pipe.config, "TRAIN_EXCHANGE_END_MS", "")
+    monkeypatch.setattr(pipe.config, "TRAIN_EXCHANGE_FETCH_SLEEP_S", 0.0)
+    monkeypatch.setattr(pipe.config, "TRAIN_EXCHANGE_FAIL_ON_SKIP", True)
+
+    def _boom(symbol: str, *args, **kwargs):
+        raise RuntimeError(f"fetch failed for {symbol}")
+
+    monkeypatch.setattr(pipe, "fetch_exchange_ohlcv_range", _boom)
+
+    with pytest.raises(RuntimeError, match="TRAIN_EXCHANGE_FAIL_ON_SKIP"):
+        pipe.collect_training_frames()
+
+
+def test_dataset_coverage_fields_rows_by_asset(monkeypatch: pytest.MonkeyPatch) -> None:
+    import tr_bot.training.pipeline as pipe
+
+    monkeypatch.setattr(pipe.config, "TRAIN_PRIMARY_ASSET", "SOL/USDT")
+    monkeypatch.setattr(pipe.config, "TRAIN_PRIMARY_SAMPLE_WEIGHT", 3.0)
+    df = pd.DataFrame(
+        {
+            "timestamp": [1, 2, 3],
+            "asset": ["SOL_USDT", "SOL_USDT", "BTC_USDT"],
+            "source": ["exchange", "exchange", "exchange"],
+        }
+    )
+    fields = pipe._dataset_coverage_fields(df)
+    assert fields["primary_asset"] == "SOL_USDT"
+    assert fields["primary_sample_weight"] == 3.0
+    assert fields["rows_by_asset"] == {"SOL_USDT": 2, "BTC_USDT": 1}
