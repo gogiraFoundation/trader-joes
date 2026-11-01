@@ -135,6 +135,10 @@ The suite covers engine gates, exits, SMC/scoring, agents, promotion, dashboard,
 | `.cursor/skills/` | Cursor skills that mirror domain standards |
 | `artifacts/` | Runtime outputs (often gitignored); do not commit secrets or live state |
 | `deploy/pi/` | Example nginx config for LAN hostname (`trbot.lan`) |
+| `Dockerfile`, `docker-compose.yml` | Image and Compose stack |
+| `start.sh`, `stop.sh` | Local process start and stop |
+| `requirements.txt`, `requirements-dev.txt` | Runtime and development dependencies |
+| `pytest.ini`, `pyrightconfig.json` | Test and typecheck config |
 
 ### Code map (selected)
 

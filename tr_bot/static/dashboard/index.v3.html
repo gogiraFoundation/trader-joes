@@ -84,25 +84,25 @@
     <p id="error-banner" class="hidden rounded-lg border border-red-500/50 bg-red-950/40 px-4 py-3 text-sm text-red-200"></p>
 
     <section id="quick-actions" class="hidden dash-panel">
-      <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-3">
-        <div>
-          <h2 class="text-lg font-semibold text-white">Quick actions</h2>
-          <p class="text-xs text-slate-500 mt-1">Write actions are gated by <code class="text-slate-400">DASHBOARD_WRITES_ENABLED</code> and, if set, a write token.</p>
+      <div class="qa-row">
+        <div class="qa-row-copy min-w-0">
+          <h2 class="text-base font-semibold text-white leading-tight">Quick actions</h2>
+          <p class="text-xs text-slate-500 mt-0.5">Write actions are gated by <code class="text-slate-400">DASHBOARD_WRITES_ENABLED</code> and, if set, a write token.</p>
+          <p id="qa-job-status" class="text-xs text-slate-400 font-mono mt-1">—</p>
         </div>
-        <p id="qa-job-status" class="text-xs text-slate-400 font-mono text-right">—</p>
+        <div class="qa-row-actions">
+          <div class="qa-danger-cluster">
+            <button type="button" id="qa-circuit-reset" class="qa-btn btn-danger rounded-lg disabled:opacity-50 disabled:cursor-not-allowed px-3 py-2 text-sm font-medium">Reset circuit breaker</button>
+            <button type="button" id="qa-trading-toggle" class="qa-btn btn-danger rounded-lg disabled:opacity-50 disabled:cursor-not-allowed px-3 py-2 text-sm font-medium">Pause trading</button>
+          </div>
+          <div class="qa-jobs-cluster">
+            <button type="button" id="qa-backtest-run" class="qa-btn rounded-lg bg-slate-700 hover:bg-slate-600 disabled:opacity-50 disabled:cursor-not-allowed px-3 py-2 text-sm font-medium">Force backtest</button>
+            <button type="button" id="qa-training-run" class="qa-btn rounded-lg bg-slate-700 hover:bg-slate-600 disabled:opacity-50 disabled:cursor-not-allowed px-3 py-2 text-sm font-medium">Force train</button>
+            <button type="button" id="qa-compare-run" class="qa-btn rounded-lg bg-slate-700 hover:bg-slate-600 disabled:opacity-50 disabled:cursor-not-allowed px-3 py-2 text-sm font-medium">Run legacy/SMC compare</button>
+          </div>
+        </div>
       </div>
-      <div class="flex flex-col gap-3">
-        <div class="qa-danger-cluster">
-          <button type="button" id="qa-circuit-reset" class="qa-btn btn-danger rounded-lg disabled:opacity-50 disabled:cursor-not-allowed px-3 py-2 text-sm font-medium">Reset circuit breaker</button>
-          <button type="button" id="qa-trading-toggle" class="qa-btn btn-danger rounded-lg disabled:opacity-50 disabled:cursor-not-allowed px-3 py-2 text-sm font-medium">Pause trading</button>
-        </div>
-        <div class="qa-jobs-cluster">
-          <button type="button" id="qa-backtest-run" class="qa-btn rounded-lg bg-slate-700 hover:bg-slate-600 disabled:opacity-50 disabled:cursor-not-allowed px-3 py-2 text-sm font-medium">Force backtest</button>
-          <button type="button" id="qa-training-run" class="qa-btn rounded-lg bg-slate-700 hover:bg-slate-600 disabled:opacity-50 disabled:cursor-not-allowed px-3 py-2 text-sm font-medium">Force train</button>
-          <button type="button" id="qa-compare-run" class="qa-btn rounded-lg bg-slate-700 hover:bg-slate-600 disabled:opacity-50 disabled:cursor-not-allowed px-3 py-2 text-sm font-medium">Run legacy/SMC compare</button>
-        </div>
-      </div>
-      <p id="qa-error" class="hidden text-xs text-rose-300 mt-3"></p>
+      <p id="qa-error" class="hidden text-xs text-rose-300 mt-2"></p>
     </section>
 
     <section class="kpi-strip" id="ops-section" aria-label="Operator KPIs">
